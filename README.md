@@ -9,9 +9,11 @@ This repository is the **official implementation** of the following paper:
 
 ---
 
-## Abstract
+## 🎓 Educational Version (Colab-ready)
 
-> Solving large-scale, continuous-time portfolio optimization problems involving numerous assets and state-dependent dynamics has long been challenged by the curse of dimensionality. Traditional dynamic programming and PDE-based methods, while rigorous, typically become computationally intractable beyond a few state variables (~3–6 limit in prior studies). To overcome this critical barrier, we introduce the Pontryagin-Guided Direct Policy Optimization (PG-DPO) framework. Our framework accurately captures both myopic demand and complex intertemporal hedging demands, a feat often elusive for other methods in high-dimensional settings. P-PGDPO delivers near-optimal policies, offering a practical and powerful alternative for a broad class of high-dimensional continuous-time control problems. PG-DPO leverages Pontryagin's Maximum Principle (PMP) and backpropagation-through-time (BPTT) to directly inform neural-network-based policy learning. A key contribution is our highly efficient Projected PG-DPO (P-PGDPO) variant. This approach uniquely utilizes BPTT to obtain rapidly stabilizing estimates of the Pontryagin costates and their crucial derivatives with respect to the state variables. These estimates are then analytically projected onto the manifold of optimal controls dictated by PMP's first-order conditions, significantly reducing training overhead and enhancing accuracy. This enables a breakthrough in scalability: numerical experiments demonstrate that P-PGDPO successfully tackles problems with dimensions previously considered far out of reach (up to 50 assets and 10 state variables). :contentReference[oaicite:0]{index=0}
+We also provide a simplified educational version of PG-DPO that can be run directly in Google Colab.
+This version is based on the Merton model with constant coefficients, and has been simplified in various ways to better suit educational purposes — for example, it removes exogenous state variables, control variates, and residual learning. The goal is to make it easier to understand the core ideas of PG-DPO without the complexity of the full framework.
+<https://drive.google.com/file/d/1JfheqSXIIq2pZY8nLnbgYx_9E-xVb9re/view?usp=sharing>
 
 ---
 
@@ -24,9 +26,3 @@ This repository is the **official implementation** of the following paper:
   journal = {arXiv preprint arXiv:2504.11116},
   year   = {2025}
 }
-
-## 🎓 Educational Version (Colab-ready)
-
-We also provide a simplified educational version of PG-DPO that can be run directly in Google Colab.
-This version is based on the Merton model with constant coefficients, and has been simplified in various ways to better suit educational purposes — for example, it removes exogenous state variables, control variates, and residual learning. The goal is to make it easier to understand the core ideas of PG-DPO without the complexity of the full framework.
-📄 [Open the educational version (Google Drive)](https://drive.google.com/file/d/1JfheqSXIIq2pZY8nLnbgYx_9E-xVb9re/view?usp=sharing)
