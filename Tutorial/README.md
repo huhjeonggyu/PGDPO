@@ -72,8 +72,8 @@ Further reduces variance and improves robustness under noisy conditions.
 ### 📝 Interpretation
 - 📉 **Stage-1 RMSE** drops sharply from BASE → Residual.  
 - 🏆 **P-PGDPO projection** consistently gives RMSE < 0.006 across all variants.  
-- 💡 Antithetic, Residual, and CV improve Stage-1 accuracy well beyond BASE.  
-- ⏳ Richardson is more valuable in **high-dimensional problems**.
+- 💡 Antithetic and Residual improve Stage-1 accuracy well beyond BASE.  
+- ⏳ CV and Richardson are more valuable in **high-dimensional problems**.
 
 ---
 
