@@ -8,49 +8,18 @@ It’s designed not just for research, but also as a **hands-on learning resourc
 
 ## 🧪 Test Environment
 
-All experiments are run on the **Kim and Omberg (1996)** continuous-time portfolio model 🏦. For tutorial clarity we use the simplest non-trivial setting — **one risky asset** and **one exogenous state variable** (the risk premium / Sharpe ratio X_t). This keeps the model easy to follow while still capturing intertemporal hedging.
+All experiments here are run on the **Kim and Omberg (1996)** continuous-time portfolio model 🏦.  
+This tutorial uses the simplest non-trivial setting — **one risky asset 💹** and **one exogenous state variable 📈** (the risk premium / Sharpe ratio X_t) — which makes it easier to understand while still capturing intertemporal hedging.
 
-**Risky asset and state dynamics.**  
-Let the risky asset price S_t follow:  
-    dS_t / S_t = mu_t * dt + sigma_t * dZ_t  
-The **risk premium** is:  
-    X_t = (mu_t - r) / sigma_t  
-Assume X_t follows an Ornstein–Uhlenbeck (OU) process:  
-    dX_t = -lambda_X * (X_t - X_bar) * dt + sigma_X * dZ_t^X  
-with correlation:  
-    E[dZ_t * dZ_t^X] = rho_mX * dt  
-(See KO eqs. (1)–(4), pp. 143–145.)
+✨ **Exogenous state dynamics** (risk premium OU process):  
+dX_t = -lambda_X * (X_t - X_bar) * dt + sigma_X * dZ_t^X
 
-It is convenient to define the **normalized return**:  
-    dR_t = (dS_t / S_t) - r * dt = X_t * dt + dZ_t  
-So all opportunity-set information is summarized by the single state X_t, together with constants (r, sigma_t).
+💰 **Wealth dynamics**:  
+dW_t = r * W_t * dt + y_t * ( (mu_t - r) * dt + sigma_t * dZ_t )
 
-**Wealth dynamics.**  
-With monetary position y_t in the risky asset (so the risk-free holding is W_t - y_t):  
-    dW_t = r * W_t * dt + y_t * ( (mu_t - r) * dt + sigma_t * dZ_t )  
-Equivalently:  
-    dW_t = r * W_t * dt + theta_t * dR_t, where theta_t = y_t / sigma_t  
-(KO eqs. (6) and (8), pp. 144–145.)
-
-**Preferences.**  
-Terminal-wealth HARA utility; in our code we use CRRA (power) utility, a special case. (KO §1 and Fig. 1, pp. 145–147.)
-
-**Closed-form optimal policy.**  
-Kim–Omberg show the optimal investment is **linear in the state X_t**. In normalized units theta_t = y_t / sigma_t:  
-    theta*(W, X, T) = T_J(W, T) * [ X + rho_mX * sigma_X * ( C(T) * X + B(T) ) ]  
-Here T_J(W, T) = -J_W / J_WW is absolute risk tolerance, and B(T), C(T) solve a Riccati ODE system (KO eqs. (16)–(20), p. 147; Appendix, pp. 158–160).
-
-Decomposition:  
-- **Myopic term**: T_J * X → collapses to the Merton rule when hedging terms vanish.  
-- **Intertemporal-hedging term**: T_J * rho_mX * sigma_X * ( C(T) * X + B(T) ) → adjusts position based on predictability in X_t.
-
-**CRRA specialization (what we use).**  
-For U(W) = W^(1-gamma) / (1-gamma), T_J(W, T) = W / gamma. Then:  
-    y*(W, X, T) = (W / gamma) * [ (mu_t - r) / sigma_t^2 + (rho_mX * sigma_X / sigma_t) * ( C(T) * X + B(T) ) ]  
-When rho_mX = 0 or sigma_X = 0 or gamma = 1 (log utility), the hedging term drops out and the policy reduces to the myopic rule (KO discussion after eqs. (19)–(23), pp. 148–149).
-
-**Why this is a great tutorial bed.**  
-The model has one risky asset and one state X_t, so you can clearly see how each enhancement (projection, antithetic, residual, CV, Richardson) changes Stage-1 and Stage-2 results, while benchmarking against a closed-form solution (B(T), C(T)).
+🎯 **Evaluation metrics**:  
+- 📏 RMSE between learned policy and the **closed-form Kim–Omberg optimal policy**  
+- 💡 Expected utility difference from the analytical optimum
 
 ---
 
