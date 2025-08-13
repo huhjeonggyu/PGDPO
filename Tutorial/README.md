@@ -8,9 +8,7 @@ It’s designed not just for research, but also as a **hands-on learning resourc
 
 ## 🧪 Test Environment
 
-All experiments are run on the **Kim and Omberg (1996)** continuous-time portfolio model 🏦.  
-For tutorial clarity we use the simplest non-trivial setting — **one risky asset** and **one exogenous state variable** (the risk premium / Sharpe ratio X_t).  
-This keeps the model easy to follow while still capturing intertemporal hedging.
+All experiments are run on the **Kim and Omberg (1996)** continuous-time portfolio model 🏦. For tutorial clarity we use the simplest non-trivial setting — **one risky asset** and **one exogenous state variable** (the risk premium / Sharpe ratio X_t). This keeps the model easy to follow while still capturing intertemporal hedging.
 
 **Risky asset and state dynamics.**  
 Let the risky asset price S_t follow:  
