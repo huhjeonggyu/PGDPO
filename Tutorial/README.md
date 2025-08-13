@@ -39,7 +39,7 @@ Maintains low RMSE while improving training stability in noisy conditions.
 
 ---
 
-### `pgdpo_richardson_single.py` — **Residual + CV + Richardson Extrapolation Demo**
+### `pgdpo_richardson_single.py` — **Residual + CV + Richardson Extrapolation**
 Same Stage-1 training as CV, but adds a simulation **Richardson extrapolation** module to demonstrate timestep bias reduction in expected utility estimation.  
 **Note:** Richardson extrapolation is often highly effective in high-dimensional problems (where timestep bias is large), but in this low-dimensional Kim–Omberg setup, it shows little or even slightly negative impact due to already small bias and increased variance.
 
