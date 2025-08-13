@@ -58,14 +58,14 @@ Further reduces variance and improves robustness under noisy conditions.
 
 ## 📊 Stage-by-Stage RMSE Results
 
-| Stage             | RMSE(Stage1 vs CF) | RMSE(PPGDPO vs CF) |
-|-------------------|--------------------|--------------------|
-| BASE              | 0.233300           | –                  |
-| P-PGDPO(direct)   | 0.233300           | 0.005522           |
-| Antithetic        | 0.164274           | 0.004254           |
-| Residual          | 0.005663           | 0.003651           |
-| CV                | 0.036626           | 0.003179           |
-| Richardson        | 0.037177           | 0.003411           |
+| Variant                                   | Stage 1 RMSE | Stage 2 RMSE |
+|-------------------------------------------|--------------|--------------|
+| Baseline PG-DPO                           | 0.233300     | –            |
+| Projected PG-DPO (P-PGDPO)                 | 0.233300     | 0.005522     |
+| P-PGDPO + Antithetic                       | 0.164274     | 0.004254     |
+| P-PGDPO + Residual                         | 0.005663     | 0.003651     |
+| P-PGDPO + Residual + Control Variate (CV)  | 0.036626     | 0.003179     |
+| P-PGDPO + Residual + CV + Richardson       | 0.037177     | 0.003411     |
 
 ---
 
