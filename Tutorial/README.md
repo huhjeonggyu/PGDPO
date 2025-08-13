@@ -1,7 +1,9 @@
 # PG-DPO Portfolio Optimization — Experiment Scripts
 
-This repository contains a series of Python scripts that implement and test **Pontryagin-Guided Direct Policy Optimization (PG-DPO)** and its variants, step-by-step.  
-The scripts progress from a baseline policy optimization to more advanced variants, demonstrating the effect of variance reduction, residual learning, control variates, and Richardson extrapolation.
+This repository contains a series of Python scripts that implement and test **Pontryagin-Guided Direct Policy Optimization (PG-DPO)** and its variants, step-by-step. The scripts progress from a baseline policy optimization to more advanced variants, demonstrating the effect of variance reduction, residual learning, control variates, and Richardson extrapolation.
+
+**Test Environment:**  
+All experiments here are run on the **Kim and Omberg (1996)** continuous-time portfolio model. This model is particularly convenient for testing because it has a **known closed-form solution** for the optimal policy, allowing us to directly compute RMSE and expected utility differences between learned policies and the analytical optimum.
 
 ## File Descriptions
 
@@ -39,7 +41,7 @@ Maintains low RMSE while improving training stability in noisy conditions.
 
 ### `pgdpo_richardson_single.py` — **Residual + CV + Richardson Extrapolation Demo**
 Same Stage-1 training as CV, but adds a simulation **Richardson extrapolation** module to demonstrate timestep bias reduction in expected utility estimation.  
-**Note:** Richardson extrapolation is often highly effective in high-dimensional problems (where timestep bias is large), but in this low-dimensional case, it shows little or even slightly negative impact due to already small bias and increased variance.
+**Note:** Richardson extrapolation is often highly effective in high-dimensional problems (where timestep bias is large), but in this low-dimensional Kim–Omberg setup, it shows little or even slightly negative impact due to already small bias and increased variance.
 
 ---
 
@@ -58,4 +60,4 @@ Same Stage-1 training as CV, but adds a simulation **Richardson extrapolation** 
 - Stage-1 RMSE drops dramatically from BASE to Residual.
 - P-PGDPO projection consistently produces RMSE < 0.006 across all variants.
 - Antithetic, Residual, and CV variants show substantial Stage-1 improvement over BASE.
-- Richardson improves high-dimensional cases significantly, but in this low-dimensional setup, its effect is minimal and can be slightly negative due to variance amplification.
+- Richardson improves high-dimensional cases significantly, but in this low-dimensional Kim–Omberg setup, its effect is minimal and can be slightly negative due to variance amplification.
