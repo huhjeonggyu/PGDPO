@@ -72,9 +72,6 @@ n_eval = 5000
 repeats = 2000
 sub_batch_size = 500
 
-# 결과 저장 폴더
-basis_folder = 'merton_single_asset_pgdpo'
-os.makedirs(basis_folder, exist_ok=True)
 
 # 분석적 머튼 최적 정책
 pi_optimal_merton = (1.0 / gamma) * (1 / (sigma**2)) * (mu - r)
