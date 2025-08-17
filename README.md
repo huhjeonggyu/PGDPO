@@ -34,6 +34,127 @@ The goal is to make it easier to understand the core mechanics without the compl
 
 📎 **Colab-ready educational version**: [Google Drive Link](https://drive.google.com/file/d/1JfheqSXIIq2pZY8nLnbgYx_9E-xVb9re/view?usp=sharing)
 
+### 🔧 Core Functions — Minimal PG-DPO ➜ P-PGDPO
+
+#### 🎲 `generate_uniform_domain`
+
+```python
+def generate_uniform_domain(n, T_max, W_min, W_max, m, dev, seed=None):
+    if seed is not None:
+        torch.manual_seed(seed)
+    T  = T_max * torch.rand([n, 1], device=dev)
+    dt = T / m                       # per-path constant step size
+    W  = W_min + (W_max - W_min) * torch.rand([n, 1], device=dev)
+    return T, W, dt
+```
+
+**Purpose:** Sampling initial states for training and evaluation.  
+
+**How it works:**
+1. Sample maturity \( T \sim \text{Uniform}(0, T_{\max}) \)  
+2. Set \( dt = T/m \) so that each path maintains a constant step size  
+3. Sample initial wealth \( W \) uniformly from \([W_{\min}, W_{\max}]\) for stability of utility scaling  
+
+**Note:** `seed` ensures reproducibility; keep the domain compact to avoid extreme values of \( W \).
+
+---
+
+#### `sim` function
+
+```python
+def sim(net_pi, T, W, dt, train=True):
+    batch_size = len(W)
+    logW = W.log()
+    sampler = Normal(0.0, 1.0)
+    for k_step in range(m):
+        t = k_step * dt
+        state_t = torch.cat([logW.exp(), T - t], dim=1)
+        pi_t = net_pi(state_t) if train else net_pi(state_t).detach()
+        mu_p  = r + pi_t * (mu - r)
+        var_p = (pi_t * sigma) ** 2
+        sigma_p = torch.sqrt(var_p)
+        dZ = sampler.sample(sample_shape=(batch_size, 1)).to(dev)   # no antithetics here (minimal)
+        logW = logW + (mu_p - 0.5 * var_p) * dt + sigma_p * dZ * dt.sqrt()
+        logW = logW.exp().clamp(min=lb_w).log()  # stabilize: enforce wealth floor
+    W_final = logW.exp()
+    U_theta = (W_final ** (1.0 - gamma)) / (1.0 - gamma)  # CRRA utility
+    return U_theta
+```
+
+**Purpose:** Monte Carlo rollout of the log-wealth SDE under policy \( \pi_t \).  
+
+**Implementation:**
+\[
+d \log W_t = \Big[ r + \pi_t(\mu - r) - \tfrac{1}{2}(\pi_t \sigma)^2 \Big] dt + (\pi_t \sigma)\, dB_t
+\]
+
+**Stability:** Operates in log space and clamps \( W \) at each step to stay above a wealth floor.  
+
+**Output:** Terminal CRRA utility \( U(W_T) \), which provides the training signal.  
+
+**Tip:** For variance/bias reduction, antithetic noise pairs and Richardson extrapolation can be added.
+
+---
+
+#### `estimate_costates` function
+
+```python
+def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
+    W0_grad = W0.detach().clone().requires_grad_(True)
+    lamb_accum   = torch.zeros_like(W0_grad)  # λ = ∂U/∂W
+    dx_lamb_accum = torch.zeros_like(W0_grad) # ∂λ/∂W
+    total_repeats_done = 0
+    for i in range(0, repeats, sub_batch_size):
+        current_repeats = min(sub_batch_size, repeats - i)
+        T_b  = T0.repeat(current_repeats, 1)
+        W_b  = W0_grad.repeat(current_repeats, 1)
+        dt_b = dt0.repeat(current_repeats, 1)
+        U = sim(net_pi, T_b, W_b, dt_b, train=False)
+        U_mean_per_point = U.view(current_repeats, W0.shape[0]).mean(dim=0)
+        lamb_batch,    = torch.autograd.grad(U_mean_per_point.sum(), W0_grad, create_graph=True, retain_graph=True)
+        dx_lamb_batch, = torch.autograd.grad(lamb_batch.sum(),        W0_grad)
+        lamb_accum    += lamb_batch.detach()    * current_repeats
+        dx_lamb_accum += dx_lamb_batch.detach() * current_repeats
+        total_repeats_done += current_repeats
+    inv_N = 1.0 / total_repeats_done
+    return (lamb_accum * inv_N, dx_lamb_accum * inv_N)
+```
+
+**Purpose:** Estimate costates via BPTT: \( \lambda = \partial U / \partial W \) and its derivative at sampled states.  
+
+**Trick:** Tile \((T_0, W_0, dt_0)\) `repeats` times, average utilities across rollouts, then compute first/second derivatives.  
+
+**Use case:** These costates are later fed into the Pontryagin projection.  
+
+**Caution:** If \( \partial^2 U / \partial W^2 \approx 0 \), projection can diverge. In practice, add small ε-guards or winsorization.
+
+---
+
+#### `get_optimal_pi` function
+
+```python
+def get_optimal_pi(W, lam, dlam_dx, mu, r, sigma, device):
+    W_t      = torch.as_tensor(W,        dtype=torch.float32, device=device)
+    lam_t    = torch.as_tensor(lam,      dtype=torch.float32, device=device)
+    dlamdx_t = torch.as_tensor(dlam_dx,  dtype=torch.float32, device=device)
+    scalar_coeff   = -lam_t / (W_t * dlamdx_t + 1e-8)   # ≈ 1/γ in the Merton model
+    myopic_demand  = (mu - r) / (sigma ** 2)
+    return scalar_coeff * myopic_demand
+```
+
+### Explanation
+
+**Purpose:** Project costates into the Pontryagin-optimal control.  
+
+**Formula (Single-asset Merton):**
+\[
+\pi_{\text{PMP}} = \Bigg[ -\frac{\lambda}{W \cdot \frac{\partial \lambda}{\partial W}} \Bigg] \cdot \frac{\mu - r}{\sigma^2}
+\]
+
+The bracketed term converges to \( 1/\gamma \).  
+
+**Safety:** Division by zero avoided with `1e-8`; mild output clipping is also common in practice.
+
 
 <details>
 <summary>📜 Show Full PG-DPO Educational Version Code</summary>
