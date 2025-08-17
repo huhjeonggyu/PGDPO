@@ -109,7 +109,7 @@ def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
         U = sim(net_pi, T_b, W_b, dt_b, train=False)
         U_mean_per_point = U.view(current_repeats, W0.shape[0]).mean(dim=0)
         lamb_batch,    = torch.autograd.grad(U_mean_per_point.sum(), W0_grad, create_graph=True, retain_graph=True)
-        dx_lamb_batch, = torch.autograd.grad(lamb_batch.sum(),        W0_grad)
+        dx_lamb_batch, = torch.autograd.grad(lamb_batch.sum(), W0_grad)
         lamb_accum    += lamb_batch.detach()    * current_repeats
         dx_lamb_accum += dx_lamb_batch.detach() * current_repeats
         total_repeats_done += current_repeats
@@ -121,7 +121,7 @@ def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
 
 **Trick:** Tile `(T0, W0, dt0)` `repeats` times, average utilities across rollouts, then compute first/second derivatives.  
 
-**First gradient:** `torch.autograd.grad(U_mean_per_point.sum(), W0_grad, create_graph=True, retain_graph=True)` → `λ = ∂U/∂W`.
+**First gradient:** `torch.autograd.grad(U_mean_per_point.sum(), W0_grad, create_graph=True, ...)` → `λ = ∂U/∂W`.
    
 **Second gradient:** `torch.autograd.grad(lamb_batch.sum(), W0_grad)` → `∂λ/∂W` (requires `create_graph=True` above).
 
