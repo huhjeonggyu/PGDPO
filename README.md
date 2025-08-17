@@ -73,7 +73,7 @@ def sim(net_pi, T, W, dt, train=True):
         mu_p  = r + pi_t * (mu - r)
         var_p = (pi_t * sigma) ** 2
         sigma_p = torch.sqrt(var_p)
-        dZ = sampler.sample(sample_shape=(batch_size, 1)).to(dev)   # no antithetics here (minimal)
+        dZ = sampler.sample(sample_shape=(batch_size, 1)).to(dev)
         logW = logW + (mu_p - 0.5 * var_p) * dt + sigma_p * dZ * dt.sqrt()
         logW = logW.exp().clamp(min=lb_w).log()  # stabilize: enforce wealth floor
     W_final = logW.exp()
