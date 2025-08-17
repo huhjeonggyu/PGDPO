@@ -31,17 +31,129 @@ Trains a Stage-1 PG-DPO policy **without** variance reduction or other enhanceme
 - Stage-1 RMSE vs closed-form policy
 - Expected utility difference vs closed-form
 
+
+**Snippet (minimal):**
+```python
+def simulate(
+    policy_module: nn.Module,
+    B: int,
+    train: bool = True,
+    W0: torch.Tensor | None = None,
+    Y0: torch.Tensor | None = None,
+    Tval: float | torch.Tensor | None = None,
+    rng: torch.Generator | None = None,
+    seed: int | None = None,
+):
+    """
+    Return pathwise CRRA utility U(W_T) for B paths.
+    - seed / rng: reproducible randomness 
+    """
+    # init states
+    if W0 is None or Y0 is None:
+        W, Y = sample_initial_states(B)
+        TmT = torch.full_like(W, T)
+    else:
+        W, Y = W0, Y0
+        if Tval is None:
+            TmT = torch.full_like(W, T)
+        elif torch.is_tensor(Tval):
+            TmT = Tval.to(device=W.device, dtype=W.dtype)
+            if TmT.shape != W.shape:
+                if TmT.numel() == 1:
+                    TmT = TmT.expand_as(W)
+                else:
+                    TmT = TmT.view_as(W)
+        else:
+            TmT = torch.full_like(W, float(Tval))
+
+    gen = rng if rng is not None else make_generator(seed)
+
+    logW = W.clamp(min=lb_W).log()
+
+    for _ in range(m):
+        with torch.set_grad_enabled(train):
+            pi_t = policy_module(logW.exp(), TmT, Y)  # [B,1]
+
+        # dynamics
+        risk_prem = sigma * (alpha * Y)               # mu - r
+        driftW = r + pi_t * risk_prem
+        varW   = (pi_t * sigma)**2
+
+        zW, zY = correlated_normals(W.shape[0], rho, gen=gen)
+        dBW = math.sqrt(dt) * zW
+        dBY = math.sqrt(dt) * zY
+
+        # log-wealth update (Ito for geometric-like wealth with control)
+        logW = logW + (driftW - 0.5*varW) * dt + (pi_t * sigma) * dBW
+        # factor OU
+        Y    = Y    + kappaY*(thetaY - Y)*dt + sigmaY * dBY
+
+        # stabilize and step time
+        logW = logW.exp().clamp(min=lb_W).log()
+        TmT  = TmT - dt
+
+    W_T = logW.exp()
+    U = W_T.log() if abs(gamma-1.0)<1e-8 else (W_T.pow(1.0-gamma))/(1.0-gamma)
+    return U  # [B,1]
+
+# ---------------- Closed-form: builder ----------------
+```
+- **Role:** Roll out log‑wealth under the current policy and return terminal utility for training/metrics.
+- **Notes:** Log‑space integration, wealth floor clamp, and per‑step policy evaluation.
+
 ---
 
 ### `pgdpo_with_ppgdpo_single.py` — **P-PGDPO (Direct Costates)**
 🎯 Takes the baseline policy and applies **PMP-based projection** using costates from BPTT.  
 Shows how projection alone boosts accuracy.
 
+
+**Snippet (minimal):**
+```python
+def estimate_costates(policy_net, T0, W0, Y0, repeats=800, sub_batch=100):
+    """
+    Estimate λ=J_W, ∂λ/∂W=J_WW, ∂λ/∂Y=J_WY at (W0,Y0,T0) under policy_net.
+    Keeps autograd graph by calling simulate(..., train=True).
+    """
+    n = W0.size(0)
+    W0g = W0.clone().requires_grad_(True)
+    Y0g = Y0.clone().requires_grad_(True)
+
+    lam_sum = torch.zeros_like(W0g)
+    dW_sum  = torch.zeros_like(W0g)
+    dY_sum  = torch.zeros_like(Y0g)
+
+    for i in range(0, repeats, sub_batch):
+        rpts = min(sub_batch, repeats - i)
+        T_b = T0.repeat(rpts,1)
+        W_b = W0g.repeat(rpts,1)
+        Y_b = Y0g.repeat(rpts,1)
+
+        # two independent MC batches, then average to reduce variance
+        u1 = simulate(policy_net, n*rpts, train=True, W0=W_b, Y0=Y_b, Tval=T_b)
+        u2 = simulate(policy_net, n*rpts, train=True, W0=W_b, Y0=Y_b, Tval=T_b)
+        avg_u = 0.5 * (u1 + u2)
+
+        avg_u_per_point = avg_u.view(rpts, n).mean(0)  # [n,1]
+        (lam_b,) = torch.autograd.grad(avg_u_per_point.sum(), W0g, create_graph=True)
+        dlamW_b, dlamY_b = torch.autograd.grad(lam_b.sum(), (W0g, Y0g), allow_unused=False)
+
+        lam_sum += lam_b.detach() * rpts
+        dW_sum  += dlamW_b.detach() * rpts
+        dY_sum  += dlamY_b.detach() * rpts
+
+    inv = 1.0 / repeats
+    return lam_sum*inv, dW_sum*inv, dY_sum*inv   # [n,1] each
+```
+- **Role:** Compute `λ = ∂U/∂W` and its derivative `∂λ/∂W` by differentiating Monte Carlo utility.
+- **Notes:** Uses `create_graph=True` for higher‑order grads; outputs feed PMP projection.
+
 ---
 
 ### `pgdpo_antithetic_single.py` — **Antithetic PG-DPO**
 🔄 Adds **antithetic sampling** to cut Monte Carlo variance in training and costate estimation.  
 Improves both RMSE and utility.
+
 
 **Snippet (minimal):**
 ```python
@@ -74,19 +186,33 @@ U = 0.5 * (crra(W_T_pos) + crra(W_T_neg))  # lower-variance utility
 🛠 Builds a residual network on top of the closed-form baseline, learning only **hedging demand corrections**.  
 Training becomes more stable and RMSE drops dramatically.
 
+
 **Snippet (minimal):**
 ```python
+def myopic_demand(mu_t, r, sigma, gamma):
+    # Generic CRRA myopic demand
+    return (mu_t - r) / (gamma * (sigma**2) + 1e-12)
+
+def myopic_from_sharpe(X_t, sigma, gamma):
+    # If the model uses Sharpe factor s.t. (mu_t - r) = sigma * X_t (Kim–Omberg)
+    return (1.0/gamma) * (X_t / (sigma + 1e-12))
+
 class ResidualPolicy(nn.Module):
     def __init__(self, base_policy):
         super().__init__()
-        self.base = base_policy                  # closed-form or teacher
-        self.res  = nn.Sequential(nn.Linear(2,128), nn.LeakyReLU(),
-                                  nn.Linear(128,128), nn.LeakyReLU(),
-                                  nn.Linear(128,1))
-    def forward(self, state):                    # state = [W, X_t or τ]
-        return self.base(state).detach() + self.res(state)  # π = π_base + δπ_θ
+        self.base = base_policy              # closed-form or a teacher policy
+        self.res  = nn.Sequential(
+            nn.Linear(2,128), nn.LeakyReLU(),
+            nn.Linear(128,128), nn.LeakyReLU(),
+            nn.Linear(128,1)
+        )
+    def forward(self, state):                # state = [W, X_t] or [features]
+        pi_base = self.base(state).detach()  # do NOT backprop through base
+        pi_res  = self.res(state)
+        return pi_base + pi_res               # π = π_base (≈ myopic+hedge) + δπ_θ
 ```
-- **Tip:** Detach the base (teacher/closed‑form) so gradients update **only** the residual.
+- **Myopic:** `(mu_t - r)/(γ σ²)` or `(1/γ) * (X_t/σ)` if `mu_t - r = σ X_t`.
+- **Residual:** Learns corrections on top of base (closed‑form/teacher) to match dynamics/hedging.
 
 ---
 
@@ -168,3 +294,4 @@ loss = -U_star.mean()
 ---
 
 💡 **Note:** While this repo is research-grade, it’s deliberately structured as a **learning-friendly tutorial** — you can run each script independently, compare results, and see exactly how each enhancement changes the outcome.
+
