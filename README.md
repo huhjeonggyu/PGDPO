@@ -51,15 +51,15 @@ def generate_uniform_domain(n, T_max, W_min, W_max, m, dev, seed=None):
 **Purpose:** Sampling initial states for training and evaluation.  
 
 **How it works:**
-1. Sample maturity \( T \sim \text{Uniform}(0, T_{\max}) \)  
-2. Set \( dt = T/m \) so that each path maintains a constant step size  
-3. Sample initial wealth \( W \) uniformly from \([W_{\min}, W_{\max}]\) for stability of utility scaling  
+1. Sample maturity `T ~ Uniform(0, T_max)`  
+2. Set `dt = T/m` so that each path maintains a constant step size  
+3. Sample initial wealth `W` uniformly from `[W_min, W_max]` for stability of utility scaling  
 
-**Note:** `seed` ensures reproducibility; keep the domain compact to avoid extreme values of \( W \).
+**Note:** `seed` ensures reproducibility; keep the domain compact to avoid extreme values of `W`.
 
 ---
 
-#### `sim` function
+#### 🌀 `sim`
 
 ```python
 def sim(net_pi, T, W, dt, train=True):
@@ -81,22 +81,21 @@ def sim(net_pi, T, W, dt, train=True):
     return U_theta
 ```
 
-**Purpose:** Monte Carlo rollout of the log-wealth SDE under policy \( \pi_t \).  
+**Purpose:** Monte Carlo rollout of the log-wealth SDE under policy `π_t`.  
 
-**Implementation:**
-\[
-d \log W_t = \Big[ r + \pi_t(\mu - r) - \tfrac{1}{2}(\pi_t \sigma)^2 \Big] dt + (\pi_t \sigma)\, dB_t
-\]
+**Implementation:**  
 
-**Stability:** Operates in log space and clamps \( W \) at each step to stay above a wealth floor.  
+`d log W_t = [ r + π_t (μ − r) − 0.5 (π_t σ)^2 ] dt + (π_t σ) dB_t`  
 
-**Output:** Terminal CRRA utility \( U(W_T) \), which provides the training signal.  
+**Stability:** Operates in log space and clamps `W` at each step to stay above a wealth floor.  
+
+**Output:** Terminal CRRA utility `U(W_T)`, which provides the training signal.  
 
 **Tip:** For variance/bias reduction, antithetic noise pairs and Richardson extrapolation can be added.
 
 ---
 
-#### `estimate_costates` function
+#### 📐 `estimate_costates`
 
 ```python
 def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
@@ -120,17 +119,17 @@ def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
     return (lamb_accum * inv_N, dx_lamb_accum * inv_N)
 ```
 
-**Purpose:** Estimate costates via BPTT: \( \lambda = \partial U / \partial W \) and its derivative at sampled states.  
+**Purpose:** Estimate costates via BPTT: `λ = ∂U/∂W` and its derivative at sampled states.  
 
-**Trick:** Tile \((T_0, W_0, dt_0)\) `repeats` times, average utilities across rollouts, then compute first/second derivatives.  
+**Trick:** Tile `(T0, W0, dt0)` `repeats` times, average utilities across rollouts, then compute first/second derivatives.  
 
 **Use case:** These costates are later fed into the Pontryagin projection.  
 
-**Caution:** If \( \partial^2 U / \partial W^2 \approx 0 \), projection can diverge. In practice, add small ε-guards or winsorization.
+**Caution:** If the second derivative `∂²U/∂W² ≈ 0`, projection can diverge. In practice, add small epsilon-guards or winsorization.
 
 ---
 
-#### `get_optimal_pi` function
+#### 🎯 `get_optimal_pi`
 
 ```python
 def get_optimal_pi(W, lam, dlam_dx, mu, r, sigma, device):
@@ -142,19 +141,17 @@ def get_optimal_pi(W, lam, dlam_dx, mu, r, sigma, device):
     return scalar_coeff * myopic_demand
 ```
 
-### Explanation
-
 **Purpose:** Project costates into the Pontryagin-optimal control.  
 
-**Formula (Single-asset Merton):**
-\[
-\pi_{\text{PMP}} = \Bigg[ -\frac{\lambda}{W \cdot \frac{\partial \lambda}{\partial W}} \Bigg] \cdot \frac{\mu - r}{\sigma^2}
-\]
+**Formula (Single-asset Merton):**  
 
-The bracketed term converges to \( 1/\gamma \).  
+`π_PMP = [ -λ / ( W * (∂λ/∂W) ) ] * (μ − r) / σ²`  
+
+The bracketed term converges to `1/γ`.  
 
 **Safety:** Division by zero avoided with `1e-8`; mild output clipping is also common in practice.
 
+---
 
 <details>
 <summary>📜 Show Full PG-DPO Educational Version Code</summary>
