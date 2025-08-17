@@ -95,8 +95,6 @@ def simulate(
     W_T = logW.exp()
     U = W_T.log() if abs(gamma-1.0)<1e-8 else (W_T.pow(1.0-gamma))/(1.0-gamma)
     return U  # [B,1]
-
-# ---------------- Closed-form: builder ----------------
 ```
 - **Role:** Roll out log‑wealth under the current policy and return terminal utility for training/metrics.
 - **Notes:** Log‑space integration, wealth floor clamp, and per‑step policy evaluation.
