@@ -89,9 +89,7 @@ def sim(net_pi, T, W, dt, train=True):
 
 **Stability:** Operates in log space and clamps `W` at each step to stay above a wealth floor.  
 
-**Output:** Terminal CRRA utility `U(W_T)`, which provides the training signal.  
-
-**Tip:** For variance/bias reduction, antithetic noise pairs and Richardson extrapolation can be added.
+**Output (Utility):** Terminal CRRA utility `U(W_T)`, which provides the training signal.  
 
 ---
 
@@ -122,6 +120,10 @@ def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
 **Purpose:** Estimate costates via BPTT: `λ = ∂U/∂W` and its derivative at sampled states.  
 
 **Trick:** Tile `(T0, W0, dt0)` `repeats` times, average utilities across rollouts, then compute first/second derivatives.  
+
+**First gradient:** `torch.autograd.grad(U_mean_per_point.sum(), W0_grad, create_graph=True, retain_graph=True)` → `λ = ∂U/∂W`.
+   
+**Second gradient:** `torch.autograd.grad(lamb_batch.sum(), W0_grad)` → `∂λ/∂W` (requires `create_graph=True` above).
 
 **Use case:** These costates are later fed into the Pontryagin projection.  
 
