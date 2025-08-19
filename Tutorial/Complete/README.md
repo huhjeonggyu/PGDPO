@@ -1,6 +1,6 @@
 # 🎓 Educational Version (Colab-ready)
 
-We also provide a simplified educational version of PG-DPO that can be run directly in Google Colab.  
+We also provide a simplified educational version of PG-DPO, `pgdpo_basic.py`.
 This version is **single-asset**, based on the Merton model with **constant coefficients**, and has been simplified in various ways to better suit educational purposes — for example:
 
 - Removes exogenous state variables, control variates, and residual learning  
@@ -8,7 +8,6 @@ This version is **single-asset**, based on the Merton model with **constant coef
 
 The goal is to make it easier to understand the core mechanics without the complexity of the full framework.
 
-📎 **Colab-ready educational version**: [Google Drive Link](https://drive.google.com/file/d/1JfheqSXIIq2pZY8nLnbgYx_9E-xVb9re/view?usp=sharing)
 
 ## 🔧 Core Functions — Minimal PG-DPO ➜ P-PGDPO
 
