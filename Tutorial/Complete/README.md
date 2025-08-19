@@ -1,6 +1,6 @@
-# 🎓 Educational Version (Colab-ready)
+# 🎓 Educational Version
 
-We also provide a simplified educational version of PG-DPO, `pgdpo_basic.py`.
+We also provide a simplified educational version of PG-DPO **`pgdpo_basic.py`**.
 This version is **single-asset**, based on the Merton model with **constant coefficients**, and has been simplified in various ways to better suit educational purposes — for example:
 
 - Removes exogenous state variables, control variates, and residual learning  
