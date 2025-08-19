@@ -1,4 +1,4 @@
-## 🎓 Educational Version (Colab-ready)
+# 🎓 Educational Version (Colab-ready)
 
 We also provide a simplified educational version of PG-DPO that can be run directly in Google Colab.  
 This version is **single-asset**, based on the Merton model with **constant coefficients**, and has been simplified in various ways to better suit educational purposes — for example:
@@ -10,9 +10,9 @@ The goal is to make it easier to understand the core mechanics without the compl
 
 📎 **Colab-ready educational version**: [Google Drive Link](https://drive.google.com/file/d/1JfheqSXIIq2pZY8nLnbgYx_9E-xVb9re/view?usp=sharing)
 
-### 🔧 Core Functions — Minimal PG-DPO ➜ P-PGDPO
+## 🔧 Core Functions — Minimal PG-DPO ➜ P-PGDPO
 
-#### 🎲 `generate_uniform_domain`
+### 🎲 `generate_uniform_domain`
 
 ```python
 def generate_uniform_domain(n, T_max, W_min, W_max, m, dev, seed=None):
@@ -35,7 +35,7 @@ def generate_uniform_domain(n, T_max, W_min, W_max, m, dev, seed=None):
 
 ---
 
-#### 🌀 `sim`
+### 🌀 `sim`
 
 ```python
 def sim(net_pi, T, W, dt, train=True):
@@ -69,7 +69,7 @@ def sim(net_pi, T, W, dt, train=True):
 
 ---
 
-#### 📐 `estimate_costates`
+### 📐 `estimate_costates`
 
 ```python
 def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
@@ -107,7 +107,7 @@ def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
 
 ---
 
-#### 🎯 `get_optimal_pi`
+### 🎯 `get_optimal_pi`
 
 ```python
 def get_optimal_pi(W, lam, dlam_dx, mu, r, sigma, device):
