@@ -13,9 +13,11 @@ from pgdpo_base_single import (
 # ===== (2) P-PGDPO core: projection formula =====
 from pgdpo_with_ppgdpo_single import project_pmp
 
-# ===== (3) Antithetic layer (default): simulate & costates =====
+# ===== (3) Runtime layer: simulate & costates (paired-noise average 내부 사용) =====
 from pgdpo_antithetic_single import (
-    simulate, simulate_pair, estimate_costates,
+    simulate,
+    simulate_pair,
+    estimate_costates,
 )
 
 # --------------------------- Hyperparams ---------------------------
@@ -26,8 +28,8 @@ LR_RESIDUAL      = 1e-3
 SEED_TRAIN_BASE  = 13579   # epoch마다 +ep로 변주
 
 # Teacher (direct P-PGDPO via costates)
-EVAL_REPEATS     = 256
-SUB_REPEAT       = 128
+EVAL_REPEATS      = 256
+SUB_REPEAT        = 128
 SEED_COSTATE_BASE = 97531
 
 # Evaluation
@@ -68,7 +70,7 @@ def train_residual_stage1(cf_policy: nn.Module,
                           epochs=EPOCHS_RESIDUAL, lr=LR_RESIDUAL,
                           seed_base=SEED_TRAIN_BASE):
     """
-    Stage-1 training with antithetic sampling as default.
+    Stage-1 training with paired-noise averaging per epoch.
     """
     pol = ResidualPolicy(cf_policy, residual_cap=RESIDUAL_CAP).to(device)
     opt = optim.Adam(pol.parameters(), lr=lr)
@@ -76,6 +78,7 @@ def train_residual_stage1(cf_policy: nn.Module,
     for ep in range(1, epochs+1):
         opt.zero_grad()
         pair_seed = None if seed_base is None else int(seed_base) + ep
+
         U_pos = simulate(pol, batch_size, train=True, seed=pair_seed, noise_sign=+1.0)
         U_neg = simulate(pol, batch_size, train=True, seed=pair_seed, noise_sign=-1.0)
         loss = -0.5 * (U_pos.mean() + U_neg.mean())
@@ -97,7 +100,7 @@ def ppgdpo_pi_direct(policy_for_sim: nn.Module,
                      repeats=EVAL_REPEATS, sub_batch=SUB_REPEAT,
                      seed_base=SEED_COSTATE_BASE):
     """
-    Functional teacher: π_pp(W,τ,Y) via PMP using antithetic costates (default).
+    Functional teacher: π_pp(W,τ,Y) via PMP using estimate_costates.
     """
     with torch.enable_grad():
         lam, dlamW, dlamY = estimate_costates(
@@ -134,7 +137,7 @@ def compare_policy_functions(stage1_policy: nn.Module, cf_policy: nn.Module):
 
 @torch.no_grad()
 def compare_expected_utility(stage1_policy: nn.Module, cf_policy: nn.Module):
-    # 공통 난수(CRN) + antithetic 평균
+    # 공통 난수(CRN) + 쌍 평균
     W0, Y0 = sample_initial_states(N_eval_paths)
     U_s1 = simulate_pair(stage1_policy, N_eval_paths, train=False, W0=W0, Y0=Y0, seed=CRN_SEED_EU)
     U_cf = simulate_pair(cf_policy,   N_eval_paths, train=False, W0=W0, Y0=Y0, seed=CRN_SEED_EU)
