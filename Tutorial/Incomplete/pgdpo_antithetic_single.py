@@ -10,8 +10,6 @@ from pgdpo_base_single import (
     N_eval_states, N_eval_paths, CRN_SEED_EU, epochs,
     # utils
     sample_initial_states,
-    # training (non-antithetic baseline)
-    train_stage1_base,  # 남겨두되 사용은 안 함
     # closed-form builder
     build_closed_form_policy,
 )
