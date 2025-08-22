@@ -19,9 +19,7 @@ from pgdpo_base_single import (
 # ------------------------------------------------------------------
 # P-PGDPO evaluation hyperparameters (caller may override if imported)
 REPEATS  = 2560
-SUBBATCH = 2560//64 #//32
-
-
+SUBBATCH = 2560 // 64  # for 16GB GPU RAM, can be increased if memory allows
 # ------------------------------------------------------------------
 
 # ------------------ Costate estimation (direct) -------------------
