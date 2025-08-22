@@ -239,37 +239,6 @@ loss = -u_adj.mean()
 
 ---
 
-### `pgdpo_richardson_single.py` — **Residual + CV + Richardson Extrapolation**
-⏩ Adds **Richardson extrapolation** to the CV setup to reduce timestep bias in utility estimates.  
-⚠️ In low-dimensional Kim–Omberg, effect is minimal (and can be slightly negative) due to already tiny bias, but **in high dimensions it can shine** ✨.
-
-**Snippet (minimal):**
-```python
-from torch.distributions import Normal
-
-def util_with_steps(net_pi, T, W, dt, refine=1):
-    sub_dt = dt / refine
-    logW = W.log(); sampler = Normal(0.0, 1.0)
-    for k in range(int(m*refine)):
-        t = k * sub_dt
-        state_t = torch.cat([logW.exp(), T - t], dim=1)
-        pi_t = net_pi(state_t)
-        mu_p = r + pi_t * (mu - r)
-        sig2 = (pi_t * sigma)**2
-        dZ = sampler.sample((len(W), 1)).to(dev)
-        logW = logW + (mu_p - 0.5*sig2)*sub_dt + torch.sqrt(sig2)*dZ*sub_dt.sqrt()
-        logW = logW.exp().clamp(min=lb_w).log()
-    return crra(logW.exp())
-
-U_coarse = util_with_steps(net_pi, T, W, dt, refine=1)
-U_fine   = util_with_steps(net_pi, T, W, dt, refine=2)
-U_star   = 2.0*U_fine - U_coarse                  # cancel O(dt) bias
-loss = -U_star.mean()
-```
-- **Note:** Combine with antithetic/CV when time‑step bias is non‑negligible.
-
----
-
 ## 📊 Stage-by-Stage RMSE Results
 
 | Variant                                   | Stage 1 RMSE | Stage 2 RMSE |
@@ -279,7 +248,6 @@ loss = -U_star.mean()
 | P-PGDPO + Antithetic                      | 0.164274     | 0.004254     |
 | P-PGDPO + Residual                        | 0.005663     | 0.003651     |
 | P-PGDPO + Residual + Control Variate (CV) | 0.036626     | 0.003179     |
-| P-PGDPO + Residual + CV + Richardson      | 0.037177     | 0.003411     |
 
 ---
 
@@ -287,7 +255,7 @@ loss = -U_star.mean()
 - 📉 **Stage-1 RMSE** drops sharply from BASE → Residual.  
 - 🏆 **P-PGDPO projection** consistently gives RMSE < 0.006 across all variants.  
 - 💡 Antithetic and Residual improve Stage-1 accuracy well beyond BASE.  
-- ⏳ CV and Richardson are more valuable in **high-dimensional problems**.
+- ⏳ CV is more valuable in **high-dimensional problems**.
 
 ---
 
