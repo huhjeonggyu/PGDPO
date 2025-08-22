@@ -2,91 +2,104 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-# ===== (1) BASE: configs, CF builder, sampler =====
+# ===== (1) BASE: configs, samplers, runner =====
 from pgdpo_base_single import (
-    device, r, gamma, sigma, kappaY, thetaY, sigmaY, rho, alpha,
-    T, m, dt, batch_size, W0_range, Y0_range, lb_W, pi_cap, CF_MODE,
-    N_eval_states, N_eval_paths, CRN_SEED_EU, epochs,
-    sample_initial_states, build_closed_form_policy,
+    device, gamma, alpha, sigma,
+    batch_size, lb_W, pi_cap,
+    epochs, seed, CRN_SEED_EU,
+    make_generator, sample_initial_states,
+    run_common,
 )
 
-# ===== (3) Antithetic layer: simulate & costates =====
+# ===== (2) P-PGDPO: eval hyperparams만 재사용 =====
+from pgdpo_with_ppgdpo_single import REPEATS, SUBBATCH
+
+# ===== (3) 안티테틱 런타임 (도메인-시간 + TRUE antithetic) & 비교 함수 재사용 =====
 from pgdpo_antithetic_single import (
-    simulate, simulate_antithetic, estimate_costates_antithetic,
+    simulate_antithetic,
+    print_policy_rmse_and_samples_antithetic as compare_policy_functions,
 )
 
-# ===== (4) Residual layer: policy + teacher + print helpers =====
-from pgdpo_residual_single import (
-    ResidualPolicy,                      # 그대로 재사용
-    ppgdpo_pi_direct_antithetic,         # teacher (PMP via antithetic costates)
-    compare_policy_functions as _compare_pf_v4,  # 출력 포맷 그대로 쓰기
-    compare_expected_utility as _compare_eu_v4,  # 출력 포맷 그대로 쓰기
-)
+# ===== (4) 4번의 마이오픽/레지듀얼 정책 재사용 =====
+from pgdpo_residual_single import MyopicPolicy, ResidualPolicy
 
-# --------------------------- Hyperparams & toggles ---------------------------
-# Residual stage-1 training (with CV)
-RESIDUAL_CAP          = 1.0
-EPOCHS_RESIDUAL       = epochs
-LR_RESIDUAL           = 1e-3
-USE_ANTITHETIC_TRAIN  = True
-SEED_TRAIN_BASE       = 13579   # epoch마다 +ep로 변주
+# --------------------------- CV 하이퍼파라미터 ---------------------------
+USE_CV       = True        # CV 사용/미사용 스위치
+CV_BETA_CLIP = 5.0         # 배치 OLS 계수 클리핑
+CV_EMA_DECAY = 0.1         # EMA 업데이트 계수 (0<δ≤1)
+CV_EPS       = 1e-8        # 수치 안정화
 
-# Control Variate (closed-form utility) settings
-USE_CV                = True
-CV_BETA_CLIP          = 5.0     # |beta| clip to avoid outliers
-CV_EPS                = 1e-8     # denom stabilization
-
-# Evaluation (CRN seed for EU print)
-CRN_SEED_EU           = 202_409_01
-
-# --------------------------- CV helpers ---------------------------
+# --------------------------- CV: 배치 OLS 계수만 (no-grad) ---------------------------
 @torch.no_grad()
-def _compute_cv_beta(u_pol_detached: torch.Tensor, u_cf: torch.Tensor, eps: float = CV_EPS, clip: float = CV_BETA_CLIP):
+def _cv_coeff_only(u_pol: torch.Tensor, u_my: torch.Tensor, W0: torch.Tensor):
     """
-    Per-batch OLS beta = Cov(U_pol, U_cf) / Var(U_cf)
-    - u_pol_detached: U(policy) but **detached** to stop grad through beta
-    - u_cf: U(closed-form), no grad path
+    배치 OLS 계수 c_hat만 추정 (여기서만 detach, no-grad).
+    c_hat = Cov(U_pol_norm, U_my_centered_norm) / Var(U_my_centered_norm)
     """
-    z_cf = u_cf - u_cf.mean()
-    var_cf = (z_cf * z_cf).mean() + eps
-    cov_pc = ((u_pol_detached - u_pol_detached.mean()) * z_cf).mean()
-    beta = cov_pc / var_cf
-    if clip is not None:
-        beta = torch.clamp(beta, -abs(clip), abs(clip))
-    return beta
+    scale       = W0.pow(1.0 - gamma)                    # [B,1]
+    u_pol_n_det = u_pol.detach() / (scale + CV_EPS)      # detach: 계수 추정에만 사용
+    u_my_cn     = (u_my - u_my.mean()) / (scale + CV_EPS)
 
-# --------------------------- Training (Residual + CV) ---------------------------
-def train_residual_stage1_cv(cf_policy: nn.Module,
-                             epochs=EPOCHS_RESIDUAL, lr=LR_RESIDUAL,
-                             use_antithetic=USE_ANTITHETIC_TRAIN, seed_base=SEED_TRAIN_BASE,
-                             use_cv: bool = USE_CV):
+    var_z = (u_my_cn * u_my_cn).mean() + CV_EPS
+    cov_pz = ((u_pol_n_det - u_pol_n_det.mean()) * u_my_cn).mean()
+    c_hat = cov_pz / var_z
+    if CV_BETA_CLIP is not None:
+        c_hat = torch.clamp(c_hat, -abs(CV_BETA_CLIP), abs(CV_BETA_CLIP))
+    return c_hat
+
+# --------------------------- 학습 (Residual + CV, 항상 안티테틱) ---------------------------
+def train_residual_stage1_cv(
+    *,
+    epochs: int = epochs,
+    lr: float = 1e-3,
+    residual_cap: float = 1.0,
+    seed_train: int | None = seed,
+    use_cv: bool = USE_CV,
+) -> nn.Module:
     """
-    Residual training with antithetic pairs and CF-based control variate.
-    - Loss uses: L = - mean( U_pol - beta * (U_cf - mean(U_cf)) )
-      where beta is per-batch OLS, computed with stop-grad (detached).
-    - NOTE: Pathwise gradient of CV term is zero; CV는 분산/로그 안정화 목적.
+    Residual 학습: 마이오픽 베이스를 고정, 잔차만 학습.
+    - 도메인-시간 샘플링(경로별 τ, Δt=τ/m), TRUE 안티테틱(+/- 동일시드)
+    - CV: 마이오픽 유틸리티 기반, W0^(1-gamma) 정규화 + 배치 OLS + EMA
+    - 코스테이트에는 CV 사용하지 않음
+    - 로그: loss만 출력
     """
-    pol = ResidualPolicy(cf_policy, residual_cap=RESIDUAL_CAP).to(device)
+    base_policy = MyopicPolicy().to(device)
+    pol = ResidualPolicy(base_policy, residual_cap=residual_cap).to(device)
     opt = optim.Adam(pol.parameters(), lr=lr)
 
-    for ep in range(1, epochs+1):
-        opt.zero_grad()
-        pair_seed = None if seed_base is None else int(seed_base) + ep
+    c_ema = None  # EMA 상태 (torch.scalar)
 
-        # ----- antithetic utility for policy -----
-        U_pos = simulate(pol, batch_size, train=True, seed=pair_seed, noise_sign=+1.0)
-        U_neg = simulate(pol, batch_size, train=True, seed=pair_seed, noise_sign=-1.0)
-        U_pol = 0.5 * (U_pos + U_neg)
+    for ep in range(1, epochs + 1):
+        opt.zero_grad()
+
+        # 에폭별 로컬 시드 (TRUE antithetic은 ± 같은 시드)
+        pair_seed = None if seed_train is None else int(seed_train) + ep
+        gen = make_generator(pair_seed)
+
+        # 동일 초기상태(공유 CRN) 준비: (W0, Y0, TmT)
+        W0, Y0, TmT, _dt = sample_initial_states(batch_size, rng=gen)
+
+        # 정책/마이오픽 유틸리티 (둘 다 같은 W0,Y0,τ와 같은 시드로 안티테틱)
+        U_pol = simulate_antithetic(pol,         batch_size, train=True,
+                                    W0=W0, Y0=Y0, Tval=TmT, seed_local=pair_seed)
+        with torch.no_grad():
+            U_my  = simulate_antithetic(base_policy, batch_size, train=False,
+                                        W0=W0, Y0=Y0, Tval=TmT, seed_local=pair_seed)
 
         if use_cv:
-            # closed-form utility with same CRNs (no grad)
-            with torch.no_grad():
-                Ucf_pos = simulate(cf_policy, batch_size, train=False, seed=pair_seed, noise_sign=+1.0)
-                Ucf_neg = simulate(cf_policy, batch_size, train=False, seed=pair_seed, noise_sign=-1.0)
-                U_cf = 0.5 * (Ucf_pos + Ucf_neg)
+            # 1) 계수 추정 (no-grad, detach는 여기서만)
+            c_hat = _cv_coeff_only(U_pol, U_my, W0)
 
-            beta = _compute_cv_beta(U_pol.detach(), U_cf)
-            loss = - (U_pol - beta * (U_cf - U_cf.mean())).mean()
+            # 2) EMA 갱신 (항상 no-grad 상태 유지)
+            c_ema = c_hat.detach() if (c_ema is None) else ((1.0 - CV_EMA_DECAY) * c_ema + CV_EMA_DECAY * c_hat.detach())
+
+            # 3) 손실에 들어갈 정규화 텐서 구성 (여기서는 grad 필요)
+            scale   = W0.pow(1.0 - gamma)
+            U_pol_n = U_pol / (scale + CV_EPS)             # 그래프 유지 → grad 흐름
+            U_my_cn = (U_my - U_my.mean()) / (scale + CV_EPS)
+
+            # 4) 최종 손실 (정규화 공간)
+            loss = - (U_pol_n - c_ema * U_my_cn).mean()
         else:
             loss = - U_pol.mean()
 
@@ -95,49 +108,25 @@ def train_residual_stage1_cv(cf_policy: nn.Module,
         opt.step()
 
         if ep % 25 == 0 or ep == 1:
-            with torch.no_grad():
-                U_est = simulate_antithetic(pol, batch_size, train=False, seed=pair_seed).mean().item()
-            # 출력 포맷은 3/4와 동일하게 유지
-            print(f"[{ep:04d}] loss={loss.item():.6f}  E[U]_policy={U_est:.6f}")
+            print(f"[{ep:04d}] loss={loss.item():.6f}")
 
     return pol
 
-# --------------------------- Wrappers to reuse v4 prints ---------------------------
-@torch.no_grad()
-def compare_policy_functions(stage1_policy: nn.Module, cf_policy: nn.Module):
-    # v4의 포맷을 그대로 재사용
-    _compare_pf_v4(stage1_policy, cf_policy)
-
-@torch.no_grad()
-def compare_expected_utility(stage1_policy: nn.Module, cf_policy: nn.Module):
-    # v4의 포맷을 그대로 재사용 (CRN+antithetic)
-    _compare_eu_v4(stage1_policy, cf_policy)
-
-# --------------------------- Run ---------------------------
+# --------------------------- Run (reuse common runner) ---------------------------
 def main():
-    # 1) Closed-form base
-    cf_policy, _ = build_closed_form_policy(mode=CF_MODE)
-
-    # 2) Stage-1 residual PG-DPO with Control-Variate
-    stage1 = train_residual_stage1_cv(cf_policy,
-                                      epochs=EPOCHS_RESIDUAL, lr=LR_RESIDUAL,
-                                      use_antithetic=USE_ANTITHETIC_TRAIN, seed_base=SEED_TRAIN_BASE,
-                                      use_cv=USE_CV)
-    with torch.no_grad():
-        U_s1 = simulate_antithetic(stage1, batch_size, train=False, seed=SEED_TRAIN_BASE+777).mean().item()
-    print(f"[After Train] E[U] Stage-1 policy (antithetic eval): {U_s1:.6f}")
-
-    # 3) Policy RMSEs (Stage-1 / P-PGDPO / CF) 
-    compare_policy_functions(stage1, cf_policy)
-
-    # 4) EU comparisons (CRN + antithetic) 
-    compare_expected_utility(stage1, cf_policy)
+    # 공용 러너 재활용:
+    #  - 학습: residual + CV(myopic) + antithetic
+    #  - 평가: 3번의 비교 함수 재사용 (CRN_SEED_EU, REPEATS/SUBBATCH 적용)
+    run_common(
+        train_fn=lambda seed_train=seed: train_residual_stage1_cv(seed_train=seed_train, use_cv=USE_CV),
+        rmse_fn=compare_policy_functions,  # 안티테틱 평가 + 교사 재사용
+        seed_train=seed,
+        rmse_kwargs={"seed_eval": CRN_SEED_EU, "repeats": REPEATS, "sub_batch": SUBBATCH},
+    )
 
 if __name__ == "__main__":
     main()
 
 __all__ = [
     "train_residual_stage1_cv",
-    "compare_policy_functions",
-    "compare_expected_utility",
 ]

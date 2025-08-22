@@ -6,8 +6,7 @@ from closed_form_ref import precompute_BC, ClosedFormPolicy
 # --------------------------- Config ---------------------------
 seed = 7
 torch.manual_seed(seed); np.random.seed(seed)
-#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 
 # Market & utility
 r = 0.02
@@ -17,12 +16,11 @@ kappaY = 1.2
 thetaY = 0.2
 sigmaY = 0.3
 rho = 0.3
-alpha = 1.  # mu - r = sigma * (alpha * Y)
+alpha = 1.0  # mu - r = sigma * (alpha * Y)
 
-# Simulation
-T = 10. # 2.
-m = 50 # 10
-dt = T / m
+# Simulation (default steps; per-path dt will be tau/m)
+T = 10.0
+m = 50
 batch_size = 1024
 W0_range = (0.1, 2.0)
 Y0_range = (-0.5, 1.5)
@@ -34,8 +32,7 @@ lr = 1e-3
 pi_cap = 2.0
 
 # Evaluation
-N_eval_states = 200
-N_eval_paths  = 1000
+N_eval_states = 1000
 CRN_SEED_EU = 24680
 
 # Closed-form mode (both scripts share)
@@ -70,10 +67,28 @@ def make_generator(seed_val: int | None):
     return g
 
 # ----------------------- Sampling utils -----------------------
-def sample_initial_states(B):
-    W0 = torch.empty(B, 1, device=device).uniform_(*W0_range)
-    Y0 = torch.empty(B, 1, device=device).uniform_(*Y0_range)
-    return W0, Y0
+T0_range = (0.0, T)  # tau in [0, T]
+
+def sample_TmT(B, rng: torch.Generator | None = None):
+    # tau ~ U[0, T]
+    return torch.rand((B, 1), device=device, generator=rng) * (T0_range[1] - T0_range[0]) + T0_range[0]
+
+def sample_initial_states(B, *, rng: torch.Generator | None = None):
+    """
+    Return (W0, Y0, TmT0, dt_vec) with per-path tau sampling.
+    W0 ~ U[W0_range], Y0 ~ U[Y0_range], tau ~ U[0, T], dt_i = tau/m
+    """
+    W0_lo, W0_hi = W0_range
+    Y0_lo, Y0_hi = Y0_range
+
+    # torch.rand(..., generator=rng) 는 generator를 지원합니다.
+    W0 = torch.rand((B, 1), device=device, generator=rng) * (W0_hi - W0_lo) + W0_lo
+    Y0 = torch.rand((B, 1), device=device, generator=rng) * (Y0_hi - Y0_lo) + Y0_lo
+
+    TmT0 = sample_TmT(B, rng=rng)          # [B,1]
+    dt_vec = TmT0 / float(m)               # [B,1], per-path Δt
+
+    return W0, Y0, TmT0, dt_vec
 
 def correlated_normals(B, rho, gen: torch.Generator | None = None):
     """Return correlated N(0,1) draws using optional generator."""
@@ -93,34 +108,45 @@ def simulate(
     Tval: float | torch.Tensor | None = None,
     rng: torch.Generator | None = None,
     seed: int | None = None,
+    per_path_dt: torch.Tensor | None = None,
+    m_steps: int = m,
 ):
     """
     Return pathwise CRRA utility U(W_T) for B paths.
+    By DEFAULT this simulator uses domain-time sampling:
+      - If W0/Y0/Tval are not provided, it samples (W0, Y0, TmT0) and sets dt_i = TmT0/m.
+      - If Tval is provided, per-path dt defaults to (Tval/m).
+    You can override the step size via per_path_dt=[B,1].
     - seed / rng: reproducible randomness 
     """
+    gen = rng if rng is not None else make_generator(seed)
+
     # init states
     if W0 is None or Y0 is None:
-        W, Y = sample_initial_states(B)
-        TmT = torch.full_like(W, T)
+        W, Y, TmT, dt_vec = sample_initial_states(B, rng=gen)
     else:
         W, Y = W0, Y0
         if Tval is None:
-            TmT = torch.full_like(W, T)
-        elif torch.is_tensor(Tval):
-            TmT = Tval.to(device=W.device, dtype=W.dtype)
-            if TmT.shape != W.shape:
-                if TmT.numel() == 1:
-                    TmT = TmT.expand_as(W)
-                else:
-                    TmT = TmT.view_as(W)
+            TmT = sample_TmT(B, rng=gen)
+            dt_vec = TmT / float(m_steps)
         else:
-            TmT = torch.full_like(W, float(Tval))
+            if torch.is_tensor(Tval):
+                TmT = Tval.to(device=W.device, dtype=W.dtype)
+                if TmT.shape != W.shape:
+                    if TmT.numel() == 1:
+                        TmT = TmT.expand_as(W)
+                    else:
+                        TmT = TmT.view_as(W)
+            else:
+                TmT = torch.full_like(W, float(Tval))
+            dt_vec = TmT / float(m_steps)
 
-    gen = rng if rng is not None else make_generator(seed)
+    if per_path_dt is not None:
+        dt_vec = per_path_dt.to(device=W.device, dtype=W.dtype)
 
     logW = W.clamp(min=lb_W).log()
 
-    for _ in range(m):
+    for _ in range(int(m_steps)):
         with torch.set_grad_enabled(train):
             pi_t = policy_module(logW.exp(), TmT, Y)  # [B,1]
 
@@ -130,17 +156,17 @@ def simulate(
         varW   = (pi_t * sigma)**2
 
         zW, zY = correlated_normals(W.shape[0], rho, gen=gen)
-        dBW = math.sqrt(dt) * zW
-        dBY = math.sqrt(dt) * zY
+        dBW = dt_vec.sqrt() * zW
+        dBY = dt_vec.sqrt() * zY
 
         # log-wealth update (Ito for geometric-like wealth with control)
-        logW = logW + (driftW - 0.5*varW) * dt + (pi_t * sigma) * dBW
+        logW = logW + (driftW - 0.5*varW) * dt_vec + (pi_t * sigma) * dBW
         # factor OU
-        Y    = Y    + kappaY*(thetaY - Y)*dt + sigmaY * dBY
+        Y    = Y    + kappaY*(thetaY - Y)*dt_vec + sigmaY * dBY
 
         # stabilize and step time
         logW = logW.exp().clamp(min=lb_W).log()
-        TmT  = TmT - dt
+        TmT  = TmT - dt_vec
 
     W_T = logW.exp()
     U = W_T.log() if abs(gamma-1.0)<1e-8 else (W_T.pow(1.0-gamma))/(1.0-gamma)
@@ -160,33 +186,34 @@ def build_closed_form_policy(mode: str = CF_MODE):
     ).to(device)
     return cf_policy, (taus, Btab, Ctab)
 
-# ----------------------------- Train ---------------------------
-def train_stage1_base(epochs_override=None, lr_override=None):
+# ----------------------------- Train (no E[U] logs) ------------
+def train_stage1_base(epochs_override=None, lr_override=None, seed_train: int | None = None):
     _epochs = epochs if epochs_override is None else int(epochs_override)
     _lr = lr if lr_override is None else float(lr_override)
 
     policy = DirectPolicy().to(device)
     opt = optim.Adam(policy.parameters(), lr=_lr)
 
+    gen = make_generator(seed_train)
+
     for ep in range(1, _epochs+1):
         opt.zero_grad()
-        loss = -simulate(policy, batch_size, train=True).mean()  # maximize E[U]
+        # DEFAULT: domain-time sampling (random tau per path)
+        loss = -simulate(policy, batch_size, train=True, rng=gen).mean()  # maximize E[U]
         loss.backward()
         nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
         opt.step()
 
         if ep % 25 == 0 or ep == 1:
-            with torch.no_grad():
-                U_est = simulate(policy, batch_size, train=False).mean().item()
-            print(f"[{ep:04d}] loss={loss.item():.6f}  E[U]_policy={U_est:.6f}")
+            # 평균효용 출력 제거 요청 반영: loss만 출력
+            print(f"[{ep:04d}] loss={loss.item():.6f}")
     return policy
 
-# ------------------------- Comparisons -------------------------
+# ------------------------- RMSE comparison ----------------------
 @torch.no_grad()
-def compare_policy_functions(trained_policy: nn.Module, cf_policy: nn.Module):
-    W = torch.empty(N_eval_states, 1, device=device).uniform_(*W0_range)
-    Y = torch.empty(N_eval_states, 1, device=device).uniform_(*Y0_range)
-    TmT = torch.full_like(W, T)
+def compare_policy_functions(trained_policy: nn.Module, cf_policy: nn.Module, seed_eval: int | None = None):
+    gen = make_generator(seed_eval)
+    W, Y, TmT, _dt = sample_initial_states(N_eval_states, rng=gen)
     pi_learn = trained_policy(W, TmT, Y)
     pi_cf    = cf_policy(W, TmT, Y)
     rmse = torch.sqrt(((pi_learn - pi_cf)**2).mean()).item()
@@ -196,37 +223,28 @@ def compare_policy_functions(trained_policy: nn.Module, cf_policy: nn.Module):
         print(f"  (W={W[i].item():.3f}, Y={Y[i].item():.3f}, τ={TmT[i].item():.2f})"
               f" -> (π_learn={pi_learn[i,0].item():.4f}, π_cf={pi_cf[i,0].item():.4f})")
 
-@torch.no_grad()
-def compare_expected_utility(trained_policy: nn.Module, cf_policy: nn.Module, CRN_SEED_EU: int = 12345):
-    # 공통 초기상태 + 동일 seed로 simulate 두 번 호출 → 공통난수(variance reduction)
-    W0, Y0 = sample_initial_states(N_eval_paths)
-    U_learn = simulate(trained_policy, N_eval_paths, train=False, W0=W0, Y0=Y0, seed=CRN_SEED_EU)
-    U_cf    = simulate(cf_policy,     N_eval_paths, train=False, W0=W0, Y0=Y0, seed=CRN_SEED_EU)
-
-    EU_learn = U_learn.mean().item()
-    EU_cf    = U_cf.mean().item()
-    std_learn = U_learn.std(unbiased=True).item()
-    std_cf    = U_cf.std(unbiased=True).item()
-
-    print(f"[EU]  E[U]_learn = {EU_learn:.6f}  (std≈{std_learn:.6f})")
-    print(f"      E[U]_closed-form = {EU_cf:.6f}  (std≈{std_cf:.6f})")
-    print(f"      Δ (learn - closed-form) = {EU_learn - EU_cf:.6f}")
+# ------------------------- Common runner ------------------------
+def run_common(train_fn, rmse_fn, *, seed_train=seed, rmse_kwargs=None):
+    """
+    Shared entry point:
+      - Builds closed-form policy
+      - Trains via train_fn(seed_train=...)
+      - Evaluates via rmse_fn(policy, cf_policy, **rmse_kwargs)
+    """
+    cf_policy, _ = build_closed_form_policy(mode=CF_MODE)
+    policy = train_fn(seed_train=seed_train)
+    rmse_kwargs = {} if rmse_kwargs is None else dict(rmse_kwargs)
+    rmse_fn(policy, cf_policy, **rmse_kwargs)
 
 # ------------------------------ Run ----------------------------
 def main():
-    # Closed-form (shared builder)
-    cf_policy, _ = build_closed_form_policy(mode=CF_MODE)
-
-    # Train Stage-1 policy
-    policy = train_stage1_base()
-
-    with torch.no_grad():
-        U_final = simulate(policy, batch_size, train=False).mean().item()
-    print(f"[After Train] E[U] (BASE policy): {U_final:.6f}")
-
-    # Optional: comparisons
-    compare_policy_functions(policy, cf_policy)
-    compare_expected_utility(policy, cf_policy)
+    # 공용 러너 재활용: BASE 정책 학습 + RMSE 비교
+    run_common(
+        train_fn=train_stage1_base,
+        rmse_fn=compare_policy_functions,
+        seed_train=seed,
+        rmse_kwargs={"seed_eval": CRN_SEED_EU},
+    )
 
 if __name__ == "__main__":
     main()
@@ -235,17 +253,19 @@ if __name__ == "__main__":
 __all__ = [
     # config
     "device","r","gamma","sigma","kappaY","thetaY","sigmaY","rho","alpha",
-    "T","m","dt","batch_size","W0_range","Y0_range","lb_W","epochs","lr","pi_cap","CF_MODE",
+    "T","m","batch_size","W0_range","Y0_range","lb_W","epochs","lr","pi_cap","CF_MODE",
     # classes
     "DirectPolicy",
     # rng helper
     "make_generator",
     # utils/sim
-    "sample_initial_states","correlated_normals","simulate",
+    "sample_TmT","sample_initial_states","correlated_normals","simulate",
     # closed-form builder
     "build_closed_form_policy",
     # training
     "train_stage1_base",
-    # comparisons
-    "compare_policy_functions","compare_expected_utility",
+    # evaluation
+    "compare_policy_functions",
+    # runner
+    "run_common",
 ]
