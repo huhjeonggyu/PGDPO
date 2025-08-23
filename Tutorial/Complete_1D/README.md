@@ -130,7 +130,7 @@ The bracketed term converges to `1/γ`.
 
 ---
 
-## 📊 Example Results (Educational Version)
+## 📊 Example Results
 
 We ran the simplified **Merton single-asset model** (`pgdpo_basic.py`).  
 Here, the **direct neural policy** gradually learns towards the optimal strategy, while the **PG-DPO projection** (Pontryagin-guided) is *exact* from the start.
