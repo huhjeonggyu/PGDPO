@@ -54,90 +54,39 @@ def simulate(policy_module, B, train=True, W0=None, Y0=None, Tval=None, rng=None
 
 ---
 
-### `pgdpo_run_single.py` — **ALWAYS RUN: Antithetic + Richardson**
-🔄 This replaces the old `pgdpo_antithetic_single.py`. The **RUN** simulator combines **true antithetic pairing** with **Richardson extrapolation** to reduce Monte Carlo bias and variance in a single, consistent runtime.  
-It returns the **Richardson-extrapolated, antithetic utility**
-\(
-U_{\mathrm{run}} \;=\; 2\,U_{\mathrm{fine}} \;-\; U_{\mathrm{coarse}}
-\)
-where each of \(U_{\mathrm{fine}}, U_{\mathrm{coarse}}\) is itself an **antithetic** average.
+### `pgdpo_run_single.py` — **Antithetic + Richardson**
+🔄 This replaces the old `pgdpo_antithetic_single.py`.  
+It applies **antithetic sampling** (variance reduction) and **Richardson extrapolation** (bias reduction) in one consistent runtime.  
 
-**Key idea:** simulate the same initial states with a coarse grid \(m\) and a fine grid \(2m\), using correlated Brownian increments (and their sign-flipped antithetic pairs), then combine them as \(2U_f - U_c\).
-
-**Core snippet (minimal):**
+**Snippet (minimal):**
 ```python
-def simulate_run(policy, B=None, *, W0=None, Y0=None, Tval=None, rng=None, seed_local=None):
-    # domain-time sampling if (W0,Y0,Tval) not provided
-    if W0 is None or Y0 is None or Tval is None:
-        assert B is not None
-        W0, Y0, TmT, _ = sample_initial_states(B, rng=rng)
-    else:
-        TmT = Tval if Tval.ndim == 2 else Tval.unsqueeze(1)
-        B = W0.size(0)
-
-    # --- coarse path (m steps), with true antithetic pairing ---
-    ZWc, ZYc = _draw_correlated_normals(B, m, rng)
-    WTc_p = _forward_path(policy, W0, TmT, Y0, +ZWc, +ZYc, m)
-    WTc_m = _forward_path(policy, W0, TmT, Y0, -ZWc, -ZYc, m)
+def simulate_run(policy, B, W0=None, Y0=None, Tval=None, seed_local=None):
+    # coarse (m steps)
+    ZWc, ZYc = _draw_correlated_normals(B, m, make_generator(seed_local))
+    WTc_p = _forward_path(policy, W0, Tval, Y0, +ZWc, +ZYc, m)
+    WTc_m = _forward_path(policy, W0, Tval, Y0, -ZWc, -ZYc, m)
     Uc = 0.5 * (_crra_utility(WTc_p, gamma) + _crra_utility(WTc_m, gamma))
 
-    # --- fine path (2m steps), decorrelated from coarse but antithetic-paired ---
-    rng_f = make_generator((seed_local or 0) + 8191) if seed_local is not None else None
-    ZWf, ZYf = _draw_correlated_normals(B, 2*m, rng_f)
-    WTf_p = _forward_path(policy, W0, TmT, Y0, +ZWf, +ZYf, 2*m)
-    WTf_m = _forward_path(policy, W0, TmT, Y0, -ZWf, -ZYf, 2*m)
+    # fine (2m steps)
+    ZWf, ZYf = _draw_correlated_normals(B, 2*m, make_generator((seed_local or 0)+8191))
+    WTf_p = _forward_path(policy, W0, Tval, Y0, +ZWf, +ZYf, 2*m)
+    WTf_m = _forward_path(policy, W0, Tval, Y0, -ZWf, -ZYf, 2*m)
     Uf = 0.5 * (_crra_utility(WTf_p, gamma) + _crra_utility(WTf_m, gamma))
 
-    # --- Richardson-extrapolated antithetic utility ---
+    # Richardson extrapolation
     return 2.0*Uf - Uc
 ```
 
-In addition, the RUN module provides **vectorized, memory-safe costate estimation** for PMP projection:
-```python
-def estimate_costates_run(policy, T0, W0, Y0, *, repeats=REPEATS, sub_batch=SUBBATCH, seed_eval=None):
-    # replicate each eval point (W0,Y0,T0) r_chunk times, run simulate_run once per chunk,
-    # average per-point, then take gradients wrt W0 (for J_W) and second-derivatives (J_WW, J_WY).
-    # policy params are temporarily frozen for speed and memory.
-    ...
-```
-Combined with the PMP projector, this yields the P‑PGDPO teacher:
-```python
-def ppgdpo_pi_run(policy, T0, W0, Y0, *, repeats=REPEATS, sub_batch=SUBBATCH, seed_eval=None):
-    J_W, J_WW, J_WY = estimate_costates_run(...)
-    return project_pmp(J_W, J_WW, J_WY, W0, Y0)
-```
+**Explanation:**  
+- Antithetic: pairs noise ± for variance reduction.  
+- Richardson: combines coarse/fine paths as \( 2U_f - U_c \) for bias reduction.  
+- Output: extrapolated, antithetic utility per path.
 
 ---
 
 ### `pgdpo_residual_single.py` — **Residual PG-DPO**
 🛠 Builds a residual network on top of a **myopic baseline policy**.  
-The residual learns only **hedging demand corrections**.
-
-**Snippet (minimal):**
-```python
-def myopic_from_sharpe(X_t, sigma, gamma):
-    return (1.0/gamma) * (X_t / (sigma + 1e-12))
-
-class MyopicPolicy(nn.Module):
-    def forward(self, state):
-        W, X_t = state[:, [0]], state[:, [1]]
-        pi = myopic_from_sharpe(X_t, sigma, gamma)
-        return pi
-
-class ResidualPolicy(nn.Module):
-    def __init__(self, base_policy):
-        super().__init__()
-        self.base = base_policy
-        self.res  = nn.Sequential(
-            nn.Linear(2,128), nn.LeakyReLU(),
-            nn.Linear(128,128), nn.LeakyReLU(),
-            nn.Linear(128,1)
-        )
-    def forward(self, state):
-        pi_base = self.base(state).detach()
-        pi_res  = self.res(state)
-        return pi_base + pi_res
-```
+The residual learns only **hedging demand corrections**, using the RUN simulator.
 
 ---
 
@@ -145,56 +94,30 @@ class ResidualPolicy(nn.Module):
 🎚 Adds a **control variate (CV)** based on **myopic utility**, simulated under identical CRNs.  
 This further reduces variance and improves robustness.
 
-**Snippet (minimal):**
-```python
-def cv_adjust(u_pol, u_my, W0):
-    u_pol_c = u_pol - u_pol.mean()
-    u_my_c  = u_my - u_my.mean()
-    beta = (u_pol_c*u_my_c).mean() / (u_my_c.square().mean() + 1e-8)
-    return (u_pol - beta*u_my), beta
-
-U_pol = simulate(policy, batch_size, train=True)
-with torch.no_grad():
-    U_my = simulate(myopic_policy, batch_size, train=False)
-U_adj, beta = cv_adjust(U_pol, U_my, W0)
-loss = -U_adj.mean()
-```
-
 ---
 
-### `pgdpo_with_ppgdpo_single.py` — **P-PGDPO (Direct Costates)**
-🎯 Takes the baseline policy and applies **PMP-based projection** using costates from BPTT.  
-Projection alone already gives a sharp RMSE reduction. The RUN path above provides a *variance-reduced* teacher; this direct version uses the base simulator.
-
-**Snippet (minimal):**
-```python
-def estimate_costates(policy_net, T0, W0, Y0, repeats, sub_batch):
-    # average chunk utilities per state, backprop to get J_W, then J_WW & J_WY
-    ...
-def project_pmp(J_W, J_WW, J_WY, W, Y):
-    # π* = -1/(W J_WW) [ J_W ((μ-r)/σ^2) + J_WY (ρ σ_Y)/σ ]
-    ...
-```
+### `pgdpo_with_ppgdpo_single.py` — **P-PGDPO (Simple Euler)**
+🎯 Applies Pontryagin-based projection with costates estimated using the **simple Euler simulator**.  
+Provides a straightforward baseline for comparing projection effects versus the variance-reduced RUN version.
 
 ---
 
 ## 📊 Stage-by-Stage RMSE Results
 
-| Variant                                   | Stage 1 RMSE | Stage 2 RMSE |
-|-------------------------------------------|--------------|--------------|
-| Baseline PG-DPO                           | 0.233300     | –            |
-| Projected PG-DPO (P-PGDPO)                | 0.233300     | 0.005522     |
-| P-PGDPO + Antithetic                      | 0.164274     | 0.004254     |
-| P-PGDPO + Residual                        | 0.005663     | 0.003651     |
-| P-PGDPO + Residual + Control Variate (CV) | 0.036626     | 0.003179     |
+| Variant                                      | Stage 1 RMSE | Stage 2 RMSE |
+|----------------------------------------------|--------------|--------------|
+| Baseline PG-DPO                              | 0.134747     | –            |
+| P-PGDPO (Simple Euler)                       | 0.134747     | 0.001600     |
+| P-PGDPO (Antithetic+Richardson)              | 0.081309     | 0.001094     |
+| Residual PG-DPO (Antithetic+Richardson)      | 0.027062     | 0.000712     |
+| Residual + Control Variate (Antithetic+Richardson) | 0.004917     | 0.000668     |
 
 ---
 
 ### 📝 Interpretation
-- 📉 **Stage-1 RMSE** drops sharply from BASE → Residual.  
-- 🏆 **P-PGDPO projection** consistently gives RMSE < 0.006 across all variants.  
-- 💡 Antithetic and Residual improve Stage-1 accuracy well beyond BASE.  
-- ⏳ CV is more valuable in **high-dimensional problems**.
+- 📉 Stage-1 RMSE drops steadily: Baseline → Residual → Residual+CV.  
+- 🏆 P-PGDPO projection consistently yields RMSE < 0.002.  
+- 💡 Antithetic+Richardson improves both baseline and residual training.  
 
 ---
 
