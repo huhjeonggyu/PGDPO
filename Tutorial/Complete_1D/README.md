@@ -1,6 +1,130 @@
+# 🐍 PG-DPO Portfolio Optimization — Experiment Scripts
+
+Welcome! 🎉  
+This repository is a **tutorial-style** collection of Python scripts that implement and test **Pontryagin-Guided Direct Policy Optimization (PG-DPO)** and its variants — step-by-step, from the most basic to more advanced forms.  
+It’s designed not just for research, but also as a **hands-on learning resource** 📚 so you can follow along, modify, and experiment.
+
+---
+
+## 🧪 Test Environment
+
+All experiments here are run on the **Kim and Omberg (1996)** continuous-time portfolio model 🏦.  
+This tutorial uses the simplest non-trivial setting — **one risky asset 💹** and **one exogenous state variable 📈** (the risk premium / Sharpe ratio \(X_t\), coded as `Y` in the scripts) — which makes it easier to understand while still capturing intertemporal hedging.
+
+✨ **Exogenous state dynamics** (OU process for risk premium):  
+`dX_t = -lambda_X * (X_t - X_bar) * dt + sigma_X * dZ_t^X`
+
+💰 **Wealth dynamics**:  
+`dW_t = r * W_t * dt + y_t * ( (mu_t - r) * dt + sigma_t * dZ_t )`
+
+🎯 **Evaluation metrics**:  
+- 📏 RMSE between learned policy and the **closed-form Kim–Omberg optimal policy**  
+- 💡 (Optional) Expected utility difference from the analytical optimum  
+  *(the default runner reports RMSE only; EU difference can be added if needed).*
+
+---
+
+## 📂 File Descriptions
+
+### `pgdpo_base_single.py` — **Baseline PG-DPO**
+🚀 The starting point.  
+Trains a Stage-1 PG-DPO policy **without** variance reduction or other enhancements. Reports:
+- Stage-1 RMSE vs closed-form policy
+
+**Snippet (minimal):**
+```python
+def simulate(policy_module, B, train=True, W0=None, Y0=None, Tval=None, rng=None, seed=None):
+    logW = W.clamp(min=lb_W).log()
+    for _ in range(m):
+        with torch.set_grad_enabled(train):
+            pi_t = policy_module(logW.exp(), TmT, Y)
+        risk_prem = sigma * (alpha * Y)
+        driftW = r + pi_t * risk_prem
+        varW   = (pi_t * sigma)**2
+        zW, zY = correlated_normals(W.shape[0], rho, gen=gen)
+        dBW, dBY = math.sqrt(dt) * zW, math.sqrt(dt) * zY
+        logW = logW + (driftW - 0.5*varW)*dt + (pi_t * sigma)*dBW
+        Y    = Y + kappaY*(thetaY - Y)*dt + sigmaY*dBY
+        logW = logW.exp().clamp(min=lb_W).log()
+        TmT  = TmT - dt
+    W_T = logW.exp()
+    U = W_T.log() if abs(gamma-1.0)<1e-8 else (W_T.pow(1.0-gamma))/(1.0-gamma)
+    return U
+```
+
+---
+
+### `pgdpo_run_single.py` — **Antithetic + Richardson**
+🔄 This replaces the old `pgdpo_antithetic_single.py`.  
+It applies **antithetic sampling** (variance reduction) and **Richardson extrapolation** (bias reduction) in one consistent runtime.  
+
+**Snippet (minimal):**
+```python
+def simulate_run(policy, B, W0=None, Y0=None, Tval=None, seed_local=None):
+    # coarse (m steps)
+    ZWc, ZYc = _draw_correlated_normals(B, m, make_generator(seed_local))
+    WTc_p = _forward_path(policy, W0, Tval, Y0, +ZWc, +ZYc, m)
+    WTc_m = _forward_path(policy, W0, Tval, Y0, -ZWc, -ZYc, m)
+    Uc = 0.5 * (_crra_utility(WTc_p, gamma) + _crra_utility(WTc_m, gamma))
+
+    # fine (2m steps)
+    ZWf, ZYf = _draw_correlated_normals(B, 2*m, make_generator((seed_local or 0)+8191))
+    WTf_p = _forward_path(policy, W0, Tval, Y0, +ZWf, +ZYf, 2*m)
+    WTf_m = _forward_path(policy, W0, Tval, Y0, -ZWf, -ZYf, 2*m)
+    Uf = 0.5 * (_crra_utility(WTf_p, gamma) + _crra_utility(WTf_m, gamma))
+
+    # Richardson extrapolation
+    return 2.0*Uf - Uc
+```
+
+**Explanation:**  
+- Antithetic: pairs noise ± for variance reduction.  
+- Richardson: combines coarse/fine paths as \( 2U_f - U_c \) for bias reduction.  
+- Output: extrapolated, antithetic utility per path.
+
+---
+
+### `pgdpo_residual_single.py` — **Residual PG-DPO**
+🛠 Builds a residual network on top of a **myopic baseline policy**.  
+The residual learns only **hedging demand corrections**, using the RUN simulator.
+
+---
+
+### `pgdpo_cv_single.py` — **Residual + Control Variate**
+🎚 Adds a **control variate (CV)** based on **myopic utility**, simulated under identical CRNs.  
+This further reduces variance and improves robustness.
+
+---
+
+### `pgdpo_with_ppgdpo_single.py` — **P-PGDPO (Simple Euler)**
+🎯 Applies Pontryagin-based projection with costates estimated using the **simple Euler simulator**.  
+Provides a straightforward baseline for comparing projection effects versus the variance-reduced RUN version.
+
+---
+
+## 📊 Stage-by-Stage RMSE Results
+
+| Variant                                      | Stage 1 RMSE | Stage 2 RMSE |
+|----------------------------------------------|--------------|--------------|
+| Baseline PG-DPO                              | 0.134747     | –            |
+| P-PGDPO (Simple Euler)                       | 0.134747     | 0.001600     |
+| P-PGDPO (Antithetic+Richardson)              | 0.081309     | 0.001094     |
+| Residual PG-DPO (Antithetic+Richardson)      | 0.027062     | 0.000712     |
+| Residual + Control Variate (Antithetic+Richardson) | 0.004917     | 0.000668     |
+
+---
+
+### 📝 Interpretation
+- 📉 Stage-1 RMSE drops steadily: Baseline → Residual → Residual+CV.  
+- 🏆 P-PGDPO projection consistently yields RMSE < 0.002.  
+- 💡 Antithetic+Richardson improves both baseline and residual training.  
+- ⏳ Control Variates provide extra stability, especially in higher dimensions.
+
+---
+
 # 🎓 Educational Version
 
-We also provide a simplified educational version of PG-DPO **`pgdpo_basic.py`**.
+We also provide a simplified educational version of PG-DPO **`pgdpo_basic.py`**.  
 This version is **single-asset**, based on the Merton model with **constant coefficients**, and has been simplified in various ways to better suit educational purposes — for example:
 
 - Removes exogenous state variables, control variates, and residual learning  
@@ -8,122 +132,43 @@ This version is **single-asset**, based on the Merton model with **constant coef
 
 The goal is to make it easier to understand the core mechanics without the complexity of the full framework.
 
+---
 
 ## 🔧 Core Functions — Minimal PG-DPO ➜ P-PGDPO
 
-### 🎲 `generate_uniform_domain`
+We include simplified implementations of:
 
-```python
-def generate_uniform_domain(n, T_max, W_min, W_max, m, dev, seed=None):
-    if seed is not None:
-        torch.manual_seed(seed)
-    T  = T_max * torch.rand([n, 1], device=dev)
-    dt = T / m                       # per-path constant step size
-    W  = W_min + (W_max - W_min) * torch.rand([n, 1], device=dev)
-    return T, W, dt
-```
+- `generate_uniform_domain` → sampling initial states  
+- `sim` → Monte Carlo rollout of log-wealth SDE  
+- `estimate_costates` → BPTT-based costate estimation  
+- `get_optimal_pi` → Pontryagin projection into Merton-optimal control  
 
-**Purpose:** Sampling initial states for training and evaluation.  
-
-**How it works:**
-1. Sample maturity `T ~ Uniform(0, T_max)`  
-2. Set `dt = T/m` so that each path maintains a constant step size  
-3. Sample initial wealth `W` uniformly from `[W_min, W_max]` for stability of utility scaling  
-
-**Note:** `seed` ensures reproducibility; keep the domain compact to avoid extreme values of `W`.
+Each of these functions mirrors the structure of the full framework but is stripped to essentials.
 
 ---
 
-### 🌀 `sim`
+## 📊 Example Results (Educational Version)
 
-```python
-def sim(net_pi, T, W, dt, train=True):
-    batch_size = len(W)
-    logW = W.log()
-    sampler = Normal(0.0, 1.0)
-    for k_step in range(m):
-        t = k_step * dt
-        state_t = torch.cat([logW.exp(), T - t], dim=1)
-        pi_t = net_pi(state_t) if train else net_pi(state_t).detach()
-        mu_p  = r + pi_t * (mu - r)
-        var_p = (pi_t * sigma) ** 2
-        sigma_p = torch.sqrt(var_p)
-        dZ = sampler.sample(sample_shape=(batch_size, 1)).to(dev)
-        logW = logW + (mu_p - 0.5 * var_p) * dt + sigma_p * dZ * dt.sqrt()
-        logW = logW.exp().clamp(min=lb_w).log()  # stabilize: enforce wealth floor
-    W_final = logW.exp()
-    U_theta = (W_final ** (1.0 - gamma)) / (1.0 - gamma)  # CRRA utility
-    return U_theta
+We ran the simplified **Merton single-asset model** (`pgdpo_basic.py`).  
+Here, the **direct neural policy** gradually learns towards the optimal strategy, while the **PG-DPO projection** (Pontryagin-guided) is *exact* from the start.
+
+```
+--- Merton Model (Single Asset) ---
+mu=0.0800, sigma=0.2000, pi*=0.7500
+-----------------------------------
+Starting training loop...
+[Iter     0] Loss=1.615353 AvgU=-1.615353 RMSE_direct=0.667845 RMSE_pgdpo=0.000000
+[Iter   250] Loss=1.528895 AvgU=-1.549450 RMSE_direct=0.377386 RMSE_pgdpo=0.000000
+[Iter   500] Loss=1.585522 AvgU=-1.548761 RMSE_direct=0.194905 RMSE_pgdpo=0.000000
+Training completed.
 ```
 
-**Purpose:** Monte Carlo rollout of the log-wealth SDE under policy `π_t`.  
+**Takeaway:**  
+- The **direct policy** improves slowly, but always lags behind the analytic optimum.  
+- The **PG-DPO projection** matches the closed-form Merton solution **perfectly from the very beginning**.  
 
-**Implementation:**  
-
-`d log W_t = [ r + π_t (μ − r) − 0.5 (π_t σ)^2 ] dt + (π_t σ) dB_t`  
-
-**Stability:** Operates in log space and clamps `W` at each step to stay above a wealth floor.  
-
-**Output (Utility):** Terminal CRRA utility `U(W_T)`, which provides the training signal.  
+This highlights the power of **Pontryagin-guided learning**: it enforces the correct structure of the optimal control, even when the neural network has not yet converged.
 
 ---
 
-### 📐 `estimate_costates`
-
-```python
-def estimate_costates(net_pi, T0, W0, dt0, repeats, sub_batch_size):
-    W0_grad = W0.detach().clone().requires_grad_(True)
-    lamb_accum   = torch.zeros_like(W0_grad)  # λ = ∂U/∂W
-    dx_lamb_accum = torch.zeros_like(W0_grad) # ∂λ/∂W
-    total_repeats_done = 0
-    for i in range(0, repeats, sub_batch_size):
-        current_repeats = min(sub_batch_size, repeats - i)
-        T_b  = T0.repeat(current_repeats, 1)
-        W_b  = W0_grad.repeat(current_repeats, 1)
-        dt_b = dt0.repeat(current_repeats, 1)
-        U = sim(net_pi, T_b, W_b, dt_b, train=False)
-        U_mean_per_point = U.view(current_repeats, W0.shape[0]).mean(dim=0)
-        lamb_batch,    = torch.autograd.grad(U_mean_per_point.sum(), W0_grad, create_graph=True, retain_graph=True)
-        dx_lamb_batch, = torch.autograd.grad(lamb_batch.sum(), W0_grad)
-        lamb_accum    += lamb_batch.detach()    * current_repeats
-        dx_lamb_accum += dx_lamb_batch.detach() * current_repeats
-        total_repeats_done += current_repeats
-    inv_N = 1.0 / total_repeats_done
-    return (lamb_accum * inv_N, dx_lamb_accum * inv_N)
-```
-
-**Purpose:** Estimate costates via BPTT: `λ = ∂U/∂W` and its derivative at sampled states.  
-
-**Trick:** Tile `(T0, W0, dt0)` `repeats` times, average utilities across rollouts, then compute first/second derivatives.  
-
-**First gradient:** `torch.autograd.grad(U_mean_per_point.sum(), W0_grad, create_graph=True, ...)` → `λ = ∂U/∂W`.
-   
-**Second gradient:** `torch.autograd.grad(lamb_batch.sum(), W0_grad)` → `∂λ/∂W` (requires `create_graph=True` above).
-
-**Use case:** These costates are later fed into the Pontryagin projection.  
-
-**Caution:** If the second derivative `∂²U/∂W² ≈ 0`, projection can diverge. In practice, add small epsilon-guards or winsorization.
-
----
-
-### 🎯 `get_optimal_pi`
-
-```python
-def get_optimal_pi(W, lam, dlam_dx, mu, r, sigma, device):
-    W_t      = torch.as_tensor(W,        dtype=torch.float32, device=device)
-    lam_t    = torch.as_tensor(lam,      dtype=torch.float32, device=device)
-    dlamdx_t = torch.as_tensor(dlam_dx,  dtype=torch.float32, device=device)
-    scalar_coeff   = -lam_t / (W_t * dlamdx_t + 1e-8)   # ≈ 1/γ in the Merton model
-    myopic_demand  = (mu - r) / (sigma ** 2)
-    return scalar_coeff * myopic_demand
-```
-
-**Purpose:** Project costates into the Pontryagin-optimal control.  
-
-**Formula (Single-asset Merton):**  
-
-`π_PMP = [ -λ / ( W * (∂λ/∂W) ) ] * (μ − r) / σ²`  
-
-The bracketed term converges to `1/γ`.  
-
-**Safety:** Division by zero avoided with `1e-8`; mild output clipping is also common in practice.
+💡 **Note:** While this repo is research-grade, it’s deliberately structured as a **learning-friendly tutorial** — you can run each script independently, compare results, and see exactly how each enhancement changes the outcome.  
