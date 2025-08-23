@@ -54,56 +54,57 @@ def simulate(policy_module, B, train=True, W0=None, Y0=None, Tval=None, rng=None
 
 ---
 
-### `pgdpo_with_ppgdpo_single.py` — **P-PGDPO (Direct Costates)**
-🎯 Takes the baseline policy and applies **PMP-based projection** using costates from BPTT.  
-Projection alone already gives a sharp RMSE reduction.
+### `pgdpo_run_single.py` — **ALWAYS RUN: Antithetic + Richardson**
+🔄 This replaces the old `pgdpo_antithetic_single.py`. The **RUN** simulator combines **true antithetic pairing** with **Richardson extrapolation** to reduce Monte Carlo bias and variance in a single, consistent runtime.  
+It returns the **Richardson-extrapolated, antithetic utility**
+\(
+U_{\mathrm{run}} \;=\; 2\,U_{\mathrm{fine}} \;-\; U_{\mathrm{coarse}}
+\)
+where each of \(U_{\mathrm{fine}}, U_{\mathrm{coarse}}\) is itself an **antithetic** average.
 
-**Snippet (minimal):**
+**Key idea:** simulate the same initial states with a coarse grid \(m\) and a fine grid \(2m\), using correlated Brownian increments (and their sign-flipped antithetic pairs), then combine them as \(2U_f - U_c\).
+
+**Core snippet (minimal):**
 ```python
-def estimate_costates(policy_net, T0, W0, Y0, repeats=800, sub_batch=100):
-    W0g = W0.clone().requires_grad_(True)
-    Y0g = Y0.clone().requires_grad_(True)
-    lam_sum = torch.zeros_like(W0g)
-    dW_sum  = torch.zeros_like(W0g)
-    dY_sum  = torch.zeros_like(Y0g)
-    for i in range(0, repeats, sub_batch):
-        rpts = min(sub_batch, repeats - i)
-        T_b, W_b, Y_b = T0.repeat(rpts,1), W0g.repeat(rpts,1), Y0g.repeat(rpts,1)
-        u1 = simulate(policy_net, n*rpts, train=True, W0=W_b, Y0=Y_b, Tval=T_b)
-        u2 = simulate(policy_net, n*rpts, train=True, W0=W_b, Y0=Y_b, Tval=T_b)
-        avg_u = 0.5 * (u1 + u2)
-        avg_u_per_point = avg_u.view(rpts, n).mean(0)
-        (lam_b,) = torch.autograd.grad(avg_u_per_point.sum(), W0g, create_graph=True)
-        dlamW_b, dlamY_b = torch.autograd.grad(lam_b.sum(), (W0g, Y0g))
-        lam_sum += lam_b.detach() * rpts
-        dW_sum  += dlamW_b.detach() * rpts
-        dY_sum  += dlamY_b.detach() * rpts
-    inv = 1.0 / repeats
-    return lam_sum*inv, dW_sum*inv, dY_sum*inv
+def simulate_run(policy, B=None, *, W0=None, Y0=None, Tval=None, rng=None, seed_local=None):
+    # domain-time sampling if (W0,Y0,Tval) not provided
+    if W0 is None or Y0 is None or Tval is None:
+        assert B is not None
+        W0, Y0, TmT, _ = sample_initial_states(B, rng=rng)
+    else:
+        TmT = Tval if Tval.ndim == 2 else Tval.unsqueeze(1)
+        B = W0.size(0)
+
+    # --- coarse path (m steps), with true antithetic pairing ---
+    ZWc, ZYc = _draw_correlated_normals(B, m, rng)
+    WTc_p = _forward_path(policy, W0, TmT, Y0, +ZWc, +ZYc, m)
+    WTc_m = _forward_path(policy, W0, TmT, Y0, -ZWc, -ZYc, m)
+    Uc = 0.5 * (_crra_utility(WTc_p, gamma) + _crra_utility(WTc_m, gamma))
+
+    # --- fine path (2m steps), decorrelated from coarse but antithetic-paired ---
+    rng_f = make_generator((seed_local or 0) + 8191) if seed_local is not None else None
+    ZWf, ZYf = _draw_correlated_normals(B, 2*m, rng_f)
+    WTf_p = _forward_path(policy, W0, TmT, Y0, +ZWf, +ZYf, 2*m)
+    WTf_m = _forward_path(policy, W0, TmT, Y0, -ZWf, -ZYf, 2*m)
+    Uf = 0.5 * (_crra_utility(WTf_p, gamma) + _crra_utility(WTf_m, gamma))
+
+    # --- Richardson-extrapolated antithetic utility ---
+    return 2.0*Uf - Uc
 ```
 
----
-
-### `pgdpo_antithetic_single.py` — **Antithetic PG-DPO**
-🔄 Adds **antithetic sampling** to cut Monte Carlo variance in both training and costate estimation.  
-Same random numbers with opposite signs are paired and averaged.
-
-**Snippet (minimal):**
+In addition, the RUN module provides **vectorized, memory-safe costate estimation** for PMP projection:
 ```python
-def simulate_with_sign(net_pi, T, W, dt, noise_sign=+1.0):
-    logW = W.log()
-    for k in range(m):
-        pi_t = net_pi(torch.cat([logW.exp(), T - k*dt], dim=1))
-        mu_p = r + pi_t * (mu - r)
-        sig2 = (pi_t * sigma)**2
-        dZ = torch.randn(len(W), 1, device=W.device) * noise_sign
-        logW = logW + (mu_p - 0.5*sig2)*dt + torch.sqrt(sig2)*dZ*dt.sqrt()
-        logW = logW.exp().clamp(min=lb_W).log()
-    return logW.exp()
-
-W_T_pos = simulate_with_sign(net_pi, T, W, dt, +1.0)
-W_T_neg = simulate_with_sign(net_pi, T, W, dt, -1.0)
-U = 0.5 * (crra(W_T_pos) + crra(W_T_neg))
+def estimate_costates_run(policy, T0, W0, Y0, *, repeats=REPEATS, sub_batch=SUBBATCH, seed_eval=None):
+    # replicate each eval point (W0,Y0,T0) r_chunk times, run simulate_run once per chunk,
+    # average per-point, then take gradients wrt W0 (for J_W) and second-derivatives (J_WW, J_WY).
+    # policy params are temporarily frozen for speed and memory.
+    ...
+```
+Combined with the PMP projector, this yields the P‑PGDPO teacher:
+```python
+def ppgdpo_pi_run(policy, T0, W0, Y0, *, repeats=REPEATS, sub_batch=SUBBATCH, seed_eval=None):
+    J_W, J_WW, J_WY = estimate_costates_run(...)
+    return project_pmp(J_W, J_WW, J_WY, W0, Y0)
 ```
 
 ---
@@ -157,6 +158,22 @@ with torch.no_grad():
     U_my = simulate(myopic_policy, batch_size, train=False)
 U_adj, beta = cv_adjust(U_pol, U_my, W0)
 loss = -U_adj.mean()
+```
+
+---
+
+### `pgdpo_with_ppgdpo_single.py` — **P-PGDPO (Direct Costates)**
+🎯 Takes the baseline policy and applies **PMP-based projection** using costates from BPTT.  
+Projection alone already gives a sharp RMSE reduction. The RUN path above provides a *variance-reduced* teacher; this direct version uses the base simulator.
+
+**Snippet (minimal):**
+```python
+def estimate_costates(policy_net, T0, W0, Y0, repeats, sub_batch):
+    # average chunk utilities per state, backprop to get J_W, then J_WW & J_WY
+    ...
+def project_pmp(J_W, J_WW, J_WY, W, Y):
+    # π* = -1/(W J_WW) [ J_W ((μ-r)/σ^2) + J_WY (ρ σ_Y)/σ ]
+    ...
 ```
 
 ---
