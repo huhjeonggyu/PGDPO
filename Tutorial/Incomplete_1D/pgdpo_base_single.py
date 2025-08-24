@@ -7,7 +7,7 @@ from closed_form_ref import precompute_BC, ClosedFormPolicy
 # --------------------------- Config ---------------------------
 seed = 7
 torch.manual_seed(seed); np.random.seed(seed)
-device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Market & utility
 r = 0.02
