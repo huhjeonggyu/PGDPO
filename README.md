@@ -14,7 +14,7 @@ This repository is the **official implementation** of the following paper:
 ```bibtex
 @article{huh2025breaking,
   title  = {Breaking the Dimensional Barrier: A Pontryagin-Guided Direct Policy Optimization for Continuous-Time Multi-Asset Portfolio},
-  author = {Huh, Jeonggyu and Jeon, Jaegi and Koo, Hyeng Keun},
+  author = {Jeonggyu Huh, Jaegi Jeon, Hyeng Keun Koo, and Byung Hwa Lim},
   journal = {arXiv preprint arXiv:2504.11116},
   year   = {2025}
 }
